@@ -1,0 +1,25 @@
+[Unit]
+Description=Camelot Workspace — Guinevere's AI Workspace
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=ken
+Group=ken
+WorkingDirectory=/home/ken/camelot-workspace
+EnvironmentFile=-/home/ken/camelot-workspace/.env
+ExecStartPre=/home/ken/camelot-workspace/scripts/start-services.sh
+ExecStart=/home/ken/camelot-workspace/venv/bin/uvicorn app:app --host 0.0.0.0 --port 7000
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camelot-workspace
+
+# Resource limits — don't starve Guinevere's inference
+Nice=5
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

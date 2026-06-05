@@ -42,11 +42,12 @@ def _content_tokens(text: str) -> list:
 
 
 class ChatProcessor:
-    def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None):
+    def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None, memory_provider_registry=None):
         self.memory_manager = memory_manager
         self.personal_docs_manager = personal_docs_manager
         self.memory_vector = memory_vector
         self.skills_manager = skills_manager
+        self.memory_provider_registry = memory_provider_registry
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
@@ -244,6 +245,40 @@ class ChatProcessor:
 
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
+
+        # Tier 2: vault_recall — long-term Obsidian vault memories
+        if use_memory and self.memory_provider_registry:
+            try:
+                import asyncio
+                vault_provider = None
+                for p in self.memory_provider_registry.active():
+                    if p.provider_id == "vault_recall":
+                        vault_provider = p
+                        break
+                if vault_provider:
+                    loop = asyncio.get_event_loop()
+                    vault_hits = loop.run_until_complete(
+                        vault_provider.recall(message, top_k=3)
+                    ) if not loop.is_running() else []
+                    # If we're inside an async context, use a sync fallback
+                    if not vault_hits and hasattr(vault_provider, '_search'):
+                        raw = vault_provider._search(message, 3)
+                        if raw:
+                            vault_texts = []
+                            total = 0
+                            for r in raw:
+                                if total + len(r["content"]) > 2000:
+                                    break
+                                vault_texts.append(f"[{r['file']}]\n{r['content']}")
+                                total += len(r["content"])
+                            if vault_texts:
+                                preface.append(untrusted_context_message(
+                                    "long-term memory: obsidian vault",
+                                    "Long-term memory from the Obsidian vault. Reference naturally "
+                                    "when relevant.\n\n" + "\n\n---\n\n".join(vault_texts),
+                                ))
+            except Exception as _e:
+                logger.debug("vault_recall context injection failed: %s", _e)
 
         # RAG: search if enabled and rag_manager available, inject only above threshold
         if use_rag:

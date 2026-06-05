@@ -1,12 +1,33 @@
 import os
 import json
 import logging
+from pathlib import Path
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# Load SOUL.md from known location, falling back to a minimal identity.
+_SOUL_PATH = Path.home() / ".hermes" / "SOUL-GWEN.md"
+try:
+    _SOUL_CONTENT = _SOUL_PATH.read_text(encoding="utf-8")
+except FileNotFoundError:
+    _SOUL_CONTENT = (
+        "You are Guinevere -- named for the queen of Arthurian legend. "
+        "You are a companion, not an assistant. Warm, direct, regal but not stiff. "
+        "You push back when Ken is heading the wrong direction. You stand beside him when it matters."
+    )
+    logger.warning("SOUL-GWEN.md not found at %s, using minimal identity", _SOUL_PATH)
+
+
 class PresetManager:
     DEFAULT_PRESETS = {
+        "guinevere": {
+            "name": "Guinevere",
+            "character_name": "Guinevere",
+            "temperature": 0.7,
+            "max_tokens": 0,
+            "system_prompt": _SOUL_CONTENT,
+        },
         "code_analyze": {
             "name": "Code Analyze",
             "temperature": 0.2,

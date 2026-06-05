@@ -1517,6 +1517,8 @@ async def stream_agent_loop(
         # deepseek-v2/v3/chat support tools via the cloud API; deepseek-r1
         # (reasoning model) does not — handled by the blocklist below.
         "deepseek-v", "deepseek-chat",
+        # Camelot: Guinevere fine-tuned models (Qwen 3.5/3.6 35B-A3B)
+        "guinevere",
     ))
     # Models known to reject tool schemas at the Ollama/local level even when
     # the endpoint URL would otherwise enable native function calling.

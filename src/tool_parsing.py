@@ -2,7 +2,8 @@
 tool_parsing.py
 
 Regex-based parsing of tool invocations from LLM response text.
-Supports fenced code blocks, [TOOL_CALL] blocks, and XML-style <invoke> blocks.
+Supports fenced code blocks, [TOOL_CALL] blocks, XML-style <invoke> blocks,
+and Guinevere-style *[Action — query]* bracket markers.
 """
 
 import re
@@ -83,6 +84,70 @@ def _normalize_dsml(text: str) -> str:
                r"<parameter name=\1>", t, flags=re.IGNORECASE)
     t = re.sub(rf"<\s*/\s*{_DSML_PIPES}\s*DSML\s*{_DSML_PIPES}\s*parameter\s*>", "</parameter>", t, flags=re.IGNORECASE)
     return t
+
+# Pattern 6: Guinevere-style bracket markers
+# Matches *[Action — query]* or *[Action -- query]* or *[Action]* (no query)
+# These are category-based tool invocations from Guinevere's fine-tuned training.
+# Only fires as a last-resort fallback after all other patterns fail.
+_BRACKET_MARKER_RE = re.compile(
+    r"\*\[([A-Za-z][A-Za-z /]+?)(?:\s*[—–\-]{1,3}\s*(.+?))?\]\*",
+)
+
+# Maps Guinevere's trained action categories (lowercased) to (tool_type, action).
+# action=None means the query becomes the full tool content.
+_BRACKET_ACTION_MAP = {
+    "searching memory": ("manage_memory", "search"),
+    "saving to memory": ("manage_memory", "add"),
+    "querying financial data": ("manage_memory", "search"),
+    "searching knowledge base": ("manage_memory", "search"),
+    "searching structured knowledge": ("manage_memory", "search"),
+    "checking structured knowledge": ("manage_memory", "search"),
+    "searching royal archives": ("manage_memory", "search"),
+    "deep search": ("manage_memory", "search"),
+    "running command": ("bash", None),
+    "checking email": ("list_emails", None),
+    "web search": ("web_search", None),
+    "quick factcheck": ("web_search", None),
+    "writing to vault": ("write_file", None),
+    "reading file": ("read_file", None),
+    "querying": ("manage_memory", "search"),
+    "step 1": None,  # Multi-step markers — skip, not actionable
+    "step 2": None,
+    "step 3": None,
+}
+
+
+def _parse_bracket_markers(text: str) -> List["ToolBlock"]:
+    """Parse Guinevere's *[Action — query]* bracket markers into ToolBlocks.
+
+    Returns an empty list if no actionable markers are found.
+    """
+    blocks = []
+    for m in _BRACKET_MARKER_RE.finditer(text):
+        action = m.group(1).strip().lower()
+        query = (m.group(2) or "").strip()
+
+        mapping = _BRACKET_ACTION_MAP.get(action)
+        if mapping is None:
+            # Try prefix matching for flexibility (e.g. "querying financial data" matches "querying")
+            for key, val in _BRACKET_ACTION_MAP.items():
+                if action.startswith(key) and val is not None:
+                    mapping = val
+                    break
+        if mapping is None:
+            continue
+
+        tool_type, sub_action = mapping
+        if sub_action:
+            # manage_memory style: action\nquery
+            content = f"{sub_action}\n{query}" if query else sub_action
+        else:
+            content = query if query else ""
+
+        if content:
+            blocks.append(ToolBlock(tool_type, content.strip()))
+    return blocks
+
 
 # Map model tool names to our tool types
 _TOOL_NAME_MAP = {
@@ -393,6 +458,10 @@ def parse_tool_blocks(text: str) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
+    # Pattern 6: Guinevere bracket markers *[Action — query]* (last resort)
+    if not blocks:
+        blocks = _parse_bracket_markers(text)
+
     return blocks
 
 
@@ -407,5 +476,7 @@ def strip_tool_blocks(text: str) -> str:
     cleaned = _TOOL_CODE_RE.sub('', cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = re.sub(r'<invoke\s+name=["\'].*?</invoke>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    # Strip Guinevere bracket markers *[Action — query]*
+    cleaned = _BRACKET_MARKER_RE.sub('', cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()

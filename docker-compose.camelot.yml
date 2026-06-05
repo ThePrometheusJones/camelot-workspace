@@ -1,0 +1,35 @@
+# Camelot Workspace — Support Services Only
+# ChromaDB (session memory vectors) + SearXNG (web search)
+# The main app runs bare metal via uvicorn, not in Docker.
+
+services:
+  chromadb:
+    image: docker.io/chromadb/chroma:latest
+    ports:
+      - "127.0.0.1:8100:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+  searxng:
+    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    ports:
+      - "127.0.0.1:8889:8080"
+    volumes:
+      - searxng-data:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8889
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    restart: unless-stopped
+
+volumes:
+  chromadb-data:
+  searxng-data:

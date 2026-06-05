@@ -68,6 +68,8 @@ class TTSService:
             return kokoro is not None and kokoro.available
         if provider.startswith("endpoint:"):
             return True  # assume reachable; errors surface at synthesis time
+        if provider == "fish_speech":
+            return True  # assume Fish Speech on :7300 is reachable
         return False
 
     # ── Cache ──
@@ -100,6 +102,25 @@ class TTSService:
         if self._kokoro is None:
             self._kokoro = _KokoroPipeline()
         return self._kokoro
+
+    # ── Fish Speech (Guinevere voice) ──
+
+    def _synthesize_fish_speech(self, text: str, voice: str = "gwen_ref") -> Optional[bytes]:
+        """Synthesize via Fish Speech API on localhost:7300."""
+        import os
+        fish_url = os.environ.get("FISH_SPEECH_URL", "http://localhost:7300")
+        try:
+            r = httpx.post(
+                f"{fish_url}/api/tts",
+                data={"text": text, "reference": voice},
+                timeout=60,
+            )
+            r.raise_for_status()
+            logger.info(f"Fish Speech TTS: {len(r.content)} bytes ({voice})")
+            return r.content
+        except Exception as e:
+            logger.error(f"Fish Speech TTS failed: {e}")
+            return None
 
     # ── API endpoint ──
 
@@ -165,7 +186,9 @@ class TTSService:
 
         audio_data = None
 
-        if provider == "local":
+        if provider == "fish_speech":
+            audio_data = self._synthesize_fish_speech(text, voice or "gwen_ref")
+        elif provider == "local":
             kokoro = self._get_kokoro()
             if kokoro and kokoro.available:
                 audio_data = kokoro.synthesize_raw(text, voice)
@@ -215,7 +238,9 @@ class TTSService:
             "cache_size_mb": round(cache_size / (1024 * 1024), 2),
         }
 
-        if provider == "local":
+        if provider == "fish_speech":
+            stats["model"] = "Fish Speech 1.5 (Guinevere voice)"
+        elif provider == "local":
             kokoro = self._get_kokoro()
             stats["model"] = "Kokoro-82M (GPU)" if (kokoro and kokoro.available) else "Kokoro (not loaded)"
         elif provider == "browser":

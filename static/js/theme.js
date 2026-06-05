@@ -9,6 +9,10 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
+  camelot:    { bg:'#1a1625', fg:'#e8d5b7', panel:'#0f0d18', border:'#3d2e5c', red:'#c9a84c',
+                advanced: { brandColor:'#c9a84c', userBubbleBg:'#2a2040', aiBubbleBg:'#1e1830',
+                            inputBg:'#241e35', inputBorder:'#3d2e5c', sendBtnBg:'#c9a84c',
+                            sendBtnHover:'#b8923d', bubbleBorder:'#3d2e5c' } },
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
   light:      { bg:'#f0ebe3', fg:'#5a5248', panel:'#faf6f0', border:'#d4cdc2', red:'#c47d5a' },
   midnight:   { bg:'#0d1117', fg:'#c9d1d9', panel:'#161b22', border:'#30363d', red:'#f85149' },
@@ -31,7 +35,7 @@ export const THEMES = {
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
 };
 
-const DEFAULT_THEME = 'dark';
+const DEFAULT_THEME = 'camelot';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 
@@ -46,6 +50,7 @@ const MAX_CUSTOM_THEMES = 8;
 
 // Default background patterns for built-in themes
 const THEME_DEFAULT_PATTERN = {
+  camelot:    'constellations',
   dark:       'none',
   light:      'dots',
   midnight:   'rain',
@@ -62,6 +67,7 @@ const THEME_DEFAULT_PATTERN = {
 
 // Default effect colors for specific themes (overrides --fg)
 const THEME_DEFAULT_EFFECT_COLOR = {
+  camelot:    '#c9a84c',
   midnight:   '#ffffff',
   organs:     '#451616',
   cute:       '#ff8cb8',
@@ -70,6 +76,7 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
 const THEME_DEFAULT_INTENSITY = {
+  camelot:    0.4,
   midnight:   0.5,
   terminal:   0.8,
   organs:     0.65,

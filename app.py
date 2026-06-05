@@ -78,9 +78,9 @@ logger = logging.getLogger(__name__)
 # and passed to FastAPI so we can use the modern context-manager lifecycle
 # instead of the deprecated @app.on_event("startup"/"shutdown") decorators.
 app = FastAPI(
-    title="AI Chat Application",
-    description="Comprehensive AI chat with memory, research, and multi-modal capabilities",
-    version="1.0.0",
+    title="Camelot Workspace",
+    description="Guinevere's home — AI workspace with memory, tools, voice, and research",
+    version="1.0.0-camelot",
 )
 
 # ========= CORS =========
@@ -479,6 +479,7 @@ research_handler  = components["research_handler"]
 chat_handler      = components["chat_handler"]
 model_discovery   = components["model_discovery"]
 skills_manager    = components["skills_manager"]
+memory_provider_registry = components["memory_provider_registry"]
 
 # TTS
 from services.tts import get_tts_service
@@ -876,6 +877,15 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Initialize memory providers (vault_recall connects to sqlite-vec DB)
+    for _provider in memory_provider_registry.active():
+        try:
+            logger.info("Initializing memory provider: %s", _provider.provider_id)
+            await _provider.initialize()
+            logger.info("Memory provider %s initialized", _provider.provider_id)
+        except Exception as _e:
+            logger.warning("Memory provider %s init failed: %s", _provider.provider_id, _e)
+
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():

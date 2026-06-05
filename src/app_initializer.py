@@ -10,6 +10,7 @@ from src.constants import (
 )
 from src.memory import MemoryManager
 from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
+from src.vault_recall_provider import VaultRecallProvider
 from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
 from core.models import set_session_manager
@@ -74,12 +75,16 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         logger.warning(f"MemoryVectorStore DEGRADED: {e}")
         memory_vector = None
 
+    # Tier 1: Odysseus native memory (session-scoped, ChromaDB-backed)
+    # Tier 2: vault_recall (long-term, Obsidian vault, sqlite-vec)
+    vault_provider = VaultRecallProvider()
     memory_provider_registry = MemoryProviderRegistry([
         NativeMemoryProvider(memory_manager, memory_vector),
+        vault_provider,
     ])
 
     # Initialize processors
-    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager)
+    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager, memory_provider_registry=memory_provider_registry)
     research_handler = ResearchHandler()
     
     # Initialize chat handler with all dependencies
