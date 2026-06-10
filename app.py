@@ -282,6 +282,19 @@ if AUTH_ENABLED:
             # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
             # network-exposed deployments regardless.
             if LOCALHOST_BYPASS and _is_trusted_loopback(request):
+                # Grant full admin access to direct localhost connections.
+                # Resolve the first admin user so routes that check current_user work.
+                _bypass_user = "admin"
+                try:
+                    _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
+                    for _u, _d in getattr(_auth_mgr, "users", {}).items():
+                        if _d.get("is_admin"):
+                            _bypass_user = _u
+                            break
+                except Exception:
+                    pass
+                request.state.current_user = _bypass_user
+                request.state.api_token = False
                 return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
