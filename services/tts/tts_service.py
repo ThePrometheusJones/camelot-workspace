@@ -2,6 +2,7 @@
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
 import io
+import os
 import wave
 import logging
 import hashlib
@@ -109,7 +110,6 @@ class TTSService:
 
     def _synthesize_fish_speech(self, text: str, voice: str = "gwen_ref") -> Optional[bytes]:
         """Synthesize via Fish Speech API on localhost:7300."""
-        import os
         fish_url = os.environ.get("FISH_SPEECH_URL", "http://localhost:7300")
         try:
             r = httpx.post(

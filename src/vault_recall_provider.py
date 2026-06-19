@@ -22,11 +22,8 @@ from src.memory_provider import MemoryProvider, MemoryRecord, MemorySearchHit
 
 logger = logging.getLogger(__name__)
 
-# Defaults — can be overridden via environment variables
-_DB_PATH = os.environ.get(
-    "VAULT_RECALL_DB",
-    os.path.expanduser("~/.hermes/vault_recall.db"),
-)
+# ponytail: env vars only, no constructor overrides — these are the ones that get used
+_DB_PATH = os.environ.get("VAULT_RECALL_DB", os.path.expanduser("~/.hermes/vault_recall.db"))
 _OLLAMA_URL = os.environ.get("VAULT_RECALL_OLLAMA_URL", "http://localhost:11434")
 _EMBED_MODEL = os.environ.get("VAULT_RECALL_EMBED_MODEL", "nomic-embed-text")
 _TOP_K = int(os.environ.get("VAULT_RECALL_TOP_K", "5"))
@@ -54,25 +51,13 @@ class VaultRecallProvider(MemoryProvider):
     provider_id = "vault_recall"
     display_name = "Obsidian Vault (long-term)"
 
-    def __init__(
-        self,
-        db_path: str = _DB_PATH,
-        ollama_url: str = _OLLAMA_URL,
-        embed_model: str = _EMBED_MODEL,
-        top_k: int = _TOP_K,
-        max_context_chars: int = _MAX_CONTEXT_CHARS,
-    ):
-        self._db_path = db_path
-        self._ollama_url = ollama_url
-        self._embed_model = embed_model
-        self._top_k = top_k
-        self._max_context_chars = max_context_chars
+    def __init__(self):
         self._db: Optional[sqlite3.Connection] = None
         self._available = False
 
     async def initialize(self) -> None:
-        if not os.path.exists(self._db_path):
-            logger.warning("vault_recall: DB not found at %s", self._db_path)
+        if not os.path.exists(_DB_PATH):
+            logger.warning("vault_recall: DB not found at %s", _DB_PATH)
             return
 
         try:
@@ -82,7 +67,7 @@ class VaultRecallProvider(MemoryProvider):
             return
 
         try:
-            self._db = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._db = sqlite3.connect(_DB_PATH, check_same_thread=False)
             self._db.enable_load_extension(True)
             sqlite_vec.load(self._db)
             self._db.enable_load_extension(False)
@@ -111,7 +96,7 @@ class VaultRecallProvider(MemoryProvider):
             return []
 
         try:
-            query_emb = _embed_query(query, self._ollama_url, self._embed_model)
+            query_emb = _embed_query(query, _OLLAMA_URL, _EMBED_MODEL)
         except Exception as e:
             logger.debug("vault_recall: embed failed: %s", e)
             return []
@@ -148,7 +133,7 @@ class VaultRecallProvider(MemoryProvider):
         owner: Optional[str] = None,
         top_k: int = 5,
     ) -> List[MemorySearchHit]:
-        results = self._search(query, min(top_k, self._top_k))
+        results = self._search(query, min(top_k, _TOP_K))
         hits = []
         for r in results:
             # Convert cosine distance to similarity score (0-1)
@@ -168,53 +153,14 @@ class VaultRecallProvider(MemoryProvider):
             )
         return hits
 
-    async def remember(
-        self,
-        text: str,
-        *,
-        owner: Optional[str] = None,
-        session_id: Optional[str] = None,
-        category: str = "fact",
-        source: str = "user",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> MemoryRecord:
-        # Read-only provider — writes go through meditation promotion
-        raise NotImplementedError(
-            "vault_recall is read-only. Long-term memories are promoted "
-            "from session memory via the meditation cycle."
-        )
+    # ponytail: ABC requires these stubs — vault is read-only, writes go through meditation
+    async def remember(self, text, *, owner=None, session_id=None, category="fact", source="user", metadata=None):
+        raise NotImplementedError("vault_recall is read-only")
 
-    async def list_memories(
-        self,
-        *,
-        owner: Optional[str] = None,
-        limit: int = 100,
-    ) -> List[MemoryRecord]:
-        if not self._db or not self._available:
-            return []
-        rows = self._db.execute(
-            """
-            SELECT c.content, f.path
-            FROM chunks c
-            JOIN files f ON f.id = c.file_id
-            ORDER BY f.updated_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [
-            MemoryRecord(
-                id=f"vault:{r[1]}",
-                text=r[0],
-                category="vault",
-                source="obsidian",
-                metadata={"file": r[1]},
-            )
-            for r in rows
-        ]
+    async def list_memories(self, *, owner=None, limit=100):
+        return []
 
-    async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
-        # Read-only — vault files are managed through Obsidian
+    async def delete(self, memory_id, *, owner=None):
         return False
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:

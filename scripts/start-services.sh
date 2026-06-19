@@ -6,27 +6,13 @@ set -euo pipefail
 
 COMPOSE_FILE="/home/ken/camelot-workspace/docker-compose.camelot.yml"
 
+# ponytail: one function, two calls
+wait_for() { for _ in $(seq 1 "$2"); do curl -sf "$1" >/dev/null 2>&1 && echo "[camelot] $3 ready" && return 0; sleep 1; done; }
+
 echo "[camelot] Starting Docker support services..."
 docker compose -f "$COMPOSE_FILE" up -d
 
-# Wait for ChromaDB to be healthy (max 30s)
-echo "[camelot] Waiting for ChromaDB..."
-for i in $(seq 1 30); do
-    if curl -sf http://localhost:8100/api/v2/heartbeat >/dev/null 2>&1; then
-        echo "[camelot] ChromaDB ready"
-        break
-    fi
-    sleep 1
-done
-
-# Wait for SearXNG (max 15s)
-echo "[camelot] Waiting for SearXNG..."
-for i in $(seq 1 15); do
-    if curl -sf http://localhost:8889/ >/dev/null 2>&1; then
-        echo "[camelot] SearXNG ready"
-        break
-    fi
-    sleep 1
-done
+wait_for "http://localhost:8100/api/v2/heartbeat" 30 "ChromaDB"
+wait_for "http://localhost:8889/" 15 "SearXNG"
 
 echo "[camelot] Support services up"

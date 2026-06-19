@@ -96,14 +96,13 @@ _BRACKET_MARKER_RE = re.compile(
 
 # Maps Guinevere's trained action categories (lowercased) to (tool_type, action).
 # action=None means the query becomes the full tool content.
+# ponytail: "searching" and "querying" prefixes catch variants via prefix match below,
+# so no need for "searching knowledge base", "querying financial data", etc.
 _BRACKET_ACTION_MAP = {
-    "searching memory": ("manage_memory", "search"),
+    "searching": ("manage_memory", "search"),
     "saving to memory": ("manage_memory", "add"),
-    "querying financial data": ("manage_memory", "search"),
-    "searching knowledge base": ("manage_memory", "search"),
-    "searching structured knowledge": ("manage_memory", "search"),
-    "checking structured knowledge": ("manage_memory", "search"),
-    "searching royal archives": ("manage_memory", "search"),
+    "checking": ("manage_memory", "search"),
+    "querying": ("manage_memory", "search"),
     "deep search": ("manage_memory", "search"),
     "running command": ("bash", None),
     "checking email": ("list_emails", None),
@@ -111,7 +110,6 @@ _BRACKET_ACTION_MAP = {
     "quick factcheck": ("web_search", None),
     "writing to vault": ("write_file", None),
     "reading file": ("read_file", None),
-    "querying": ("manage_memory", "search"),
     "step 1": None,  # Multi-step markers — skip, not actionable
     "step 2": None,
     "step 3": None,

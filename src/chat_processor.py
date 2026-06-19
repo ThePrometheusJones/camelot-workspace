@@ -251,36 +251,27 @@ class ChatProcessor:
             # agent mode so chat mode and incognito stay clean.)
 
         # Tier 2: vault_recall — long-term Obsidian vault memories
+        # ponytail: skip async dance, FastAPI loop is always running — call _search directly
         if use_memory and self.memory_provider_registry:
             try:
-                import asyncio
-                vault_provider = None
-                for p in self.memory_provider_registry.active():
-                    if p.provider_id == "vault_recall":
-                        vault_provider = p
-                        break
-                if vault_provider:
-                    loop = asyncio.get_event_loop()
-                    vault_hits = loop.run_until_complete(
-                        vault_provider.recall(message, top_k=3)
-                    ) if not loop.is_running() else []
-                    # If we're inside an async context, use a sync fallback
-                    if not vault_hits and hasattr(vault_provider, '_search'):
-                        raw = vault_provider._search(message, 3)
-                        if raw:
-                            vault_texts = []
-                            total = 0
-                            for r in raw:
-                                if total + len(r["content"]) > 2000:
-                                    break
-                                vault_texts.append(f"[{r['file']}]\n{r['content']}")
-                                total += len(r["content"])
-                            if vault_texts:
-                                preface.append(untrusted_context_message(
-                                    "long-term memory: obsidian vault",
-                                    "Long-term memory from the Obsidian vault. Reference naturally "
-                                    "when relevant.\n\n" + "\n\n---\n\n".join(vault_texts),
-                                ))
+                vault_provider = next(
+                    (p for p in self.memory_provider_registry.active() if p.provider_id == "vault_recall"), None
+                )
+                if vault_provider and hasattr(vault_provider, '_search'):
+                    raw = vault_provider._search(message, 3)
+                    if raw:
+                        vault_texts, total = [], 0
+                        for r in raw:
+                            if total + len(r["content"]) > 2000:
+                                break
+                            vault_texts.append(f"[{r['file']}]\n{r['content']}")
+                            total += len(r["content"])
+                        if vault_texts:
+                            preface.append(untrusted_context_message(
+                                "long-term memory: obsidian vault",
+                                "Long-term memory from the Obsidian vault. Reference naturally "
+                                "when relevant.\n\n" + "\n\n---\n\n".join(vault_texts),
+                            ))
             except Exception as _e:
                 logger.debug("vault_recall context injection failed: %s", _e)
 
