@@ -233,6 +233,43 @@ def test_q_empty_input():
     assert _q(None) == '""'
 
 
+# ── provider auth error normalization ──────────────────────────
+
+def _import_friendly_email_auth_error():
+    sys.modules.pop("routes.email_helpers", None)
+    from routes.email_helpers import _friendly_email_auth_error  # noqa: WPS433
+    return _friendly_email_auth_error
+
+
+def test_outlook_smtp_basic_auth_error_is_actionable():
+    normalize = _import_friendly_email_auth_error()
+    msg = normalize(
+        "SMTP",
+        "smtp.office365.com",
+        "(535, b'5.7.139 Authentication unsuccessful, basic authentication is disabled.')",
+    )
+
+    assert "Microsoft no longer accepts normal mailbox passwords" in msg
+    assert "OAuth/Graph" in msg
+    assert "535" not in msg
+
+
+def test_outlook_imap_authenticate_failed_is_actionable():
+    normalize = _import_friendly_email_auth_error()
+    msg = normalize("IMAP", "outlook.office365.com", "b'AUTHENTICATE failed.'")
+
+    assert "Microsoft no longer accepts normal mailbox passwords" in msg
+    assert "Outlook/Office 365" in msg
+
+
+def test_generic_auth_error_still_passes_through_truncated():
+    normalize = _import_friendly_email_auth_error()
+    msg = normalize("IMAP", "imap.example.com", "bad credentials " + ("x" * 300))
+
+    assert msg.startswith("bad credentials")
+    assert len(msg) == 200
+
+
 # ── compose-upload path traversal block ─────────────────────────
 
 @pytest.mark.parametrize(
@@ -935,7 +972,7 @@ def test_mcp_oauth_page_escapes_reflected_values():
     src = Path(__file__).resolve().parents[1] / "routes" / "mcp_routes.py"
     text = src.read_text()
     body = text.split("def _oauth_authorize_page(", 1)[1].split("return f", 1)[0]
-    for var in ("auth_url", "server_id", "host"):
+    for var in ("auth_url", "server_id", "host", "redirect_uri"):
         assert f"{var} = html.escape({var}" in body, var
 
 
@@ -944,9 +981,21 @@ def _import_mcp_routes():
     return importlib.import_module("routes.mcp_routes")
 
 
+def test_google_mcp_oauth_uses_configured_redirect_base(monkeypatch):
+    monkeypatch.setenv("OAUTH_REDIRECT_BASE_URL", "https://odysseus.example/app/")
+    monkeypatch.delenv("APP_PUBLIC_URL", raising=False)
+    sys.modules.pop("src.mcp_oauth", None)
+    mcp_routes = _import_mcp_routes()
+
+    assert (
+        mcp_routes._mcp_oauth_redirect_uri()
+        == "https://odysseus.example/app/api/mcp/oauth/callback"
+    )
+
+
 def test_mcp_oauth_paths_resolve_under_data_dir(tmp_path, monkeypatch):
     mcp_routes = _import_mcp_routes()
-    monkeypatch.setattr(mcp_routes, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(mcp_routes, "MCP_OAUTH_DIR", str(tmp_path / "data" / "mcp_oauth"))
 
     resolved = Path(mcp_routes._resolve_mcp_oauth_path("gmail/credentials.json", "token_file"))
 
@@ -963,7 +1012,7 @@ def test_mcp_oauth_paths_reject_escapes(tmp_path, monkeypatch, raw_path):
     from fastapi import HTTPException
 
     mcp_routes = _import_mcp_routes()
-    monkeypatch.setattr(mcp_routes, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(mcp_routes, "MCP_OAUTH_DIR", str(tmp_path / "data" / "mcp_oauth"))
 
     with pytest.raises(HTTPException) as exc:
         mcp_routes._resolve_mcp_oauth_path(raw_path, "token_file")
@@ -974,7 +1023,7 @@ def test_mcp_oauth_filename_join_cannot_escape_base(tmp_path, monkeypatch):
     from fastapi import HTTPException
 
     mcp_routes = _import_mcp_routes()
-    monkeypatch.setattr(mcp_routes, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(mcp_routes, "MCP_OAUTH_DIR", str(tmp_path / "data" / "mcp_oauth"))
 
     safe_dir = mcp_routes._resolve_mcp_oauth_path("gmail", "dir")
     with pytest.raises(HTTPException):
@@ -983,7 +1032,7 @@ def test_mcp_oauth_filename_join_cannot_escape_base(tmp_path, monkeypatch):
 
 def test_mcp_oauth_config_sanitizes_paths_and_env(tmp_path, monkeypatch):
     mcp_routes = _import_mcp_routes()
-    monkeypatch.setattr(mcp_routes, "DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(mcp_routes, "MCP_OAUTH_DIR", str(tmp_path / "data" / "mcp_oauth"))
 
     cfg = mcp_routes._sanitize_mcp_oauth_config({
         "provider": "google",
@@ -1015,50 +1064,37 @@ def test_gmail_mcp_preset_uses_contained_oauth_paths():
 
 # -- export/gallery filename hardening ----------------------------------------
 
-def _install_route_import_stubs(monkeypatch):
-    core_mod = types.ModuleType("core")
-    core_mod.__path__ = []
-
-    db_mod = types.ModuleType("core.database")
-    db_mod.SessionLocal = lambda: None
-    for name in (
-        "Session",
-        "Document",
-        "GalleryImage",
-        "GalleryAlbum",
-        "ModelEndpoint",
-    ):
-        setattr(db_mod, name, type(name, (), {}))
-
-    session_manager_mod = types.ModuleType("core.session_manager")
-    session_manager_mod.SessionManager = type("SessionManager", (), {})
-
-    models_mod = types.ModuleType("core.models")
-    models_mod.ChatMessage = type("ChatMessage", (), {})
-
-    monkeypatch.setitem(sys.modules, "core", core_mod)
-    monkeypatch.setitem(sys.modules, "core.database", db_mod)
-    monkeypatch.setitem(sys.modules, "core.session_manager", session_manager_mod)
-    monkeypatch.setitem(sys.modules, "core.models", models_mod)
+def _drop_route_module_cache(dotted_name):
+    """Evict a cached route module from both sys.modules and the parent package
+    attribute. The next import then re-binds against the live core.database
+    instead of reusing a stale (possibly stub-polluted) module object — Python
+    can reach a module via either path, so both must be cleared."""
+    sys.modules.pop(dotted_name, None)
+    pkg_name, _, attr = dotted_name.rpartition(".")
+    pkg = sys.modules.get(pkg_name)
+    if pkg is not None and hasattr(pkg, attr):
+        delattr(pkg, attr)
 
 
-def _import_session_routes_for_filename(monkeypatch):
-    _install_route_import_stubs(monkeypatch)
-    monkeypatch.delitem(sys.modules, "routes.session_routes", raising=False)
-    from routes import session_routes
-    return session_routes
+def _import_session_routes_for_filename():
+    # Only the pure _sanitize_export_filename helper is exercised here, so import
+    # against the REAL core.database. Importing under a stub Session class would
+    # leak a stub-bound DbSession into the cached module and break later tests
+    # that reuse routes.session_routes (e.g. the archived-sessions filter).
+    _drop_route_module_cache("routes.session_routes")
+    return importlib.import_module("routes.session_routes")
 
 
-def _import_gallery_routes_for_filename(monkeypatch):
-    _install_route_import_stubs(monkeypatch)
-    monkeypatch.delitem(sys.modules, "routes.gallery_helpers", raising=False)
-    monkeypatch.delitem(sys.modules, "routes.gallery_routes", raising=False)
-    from routes import gallery_routes
-    return gallery_routes
+def _import_gallery_routes_for_filename():
+    # Same rationale as the session route helper: import _sanitize_gallery_filename
+    # against the real core.database and leave a clean, real module cached.
+    _drop_route_module_cache("routes.gallery_routes")
+    _drop_route_module_cache("routes.gallery_helpers")
+    return importlib.import_module("routes.gallery_routes")
 
 
-def test_export_filename_sanitizer_blocks_header_and_path_chars(monkeypatch):
-    mod = _import_session_routes_for_filename(monkeypatch)
+def test_export_filename_sanitizer_blocks_header_and_path_chars():
+    mod = _import_session_routes_for_filename()
 
     out = mod._sanitize_export_filename('chat.md\r\nX-Test: yes/..\\evil;quote".txt\x00')
 
@@ -1068,15 +1104,15 @@ def test_export_filename_sanitizer_blocks_header_and_path_chars(monkeypatch):
         assert ch not in out
 
 
-def test_export_filename_sanitizer_preserves_safe_names(monkeypatch):
-    mod = _import_session_routes_for_filename(monkeypatch)
+def test_export_filename_sanitizer_preserves_safe_names():
+    mod = _import_session_routes_for_filename()
 
     assert mod._sanitize_export_filename("conversation_20260602.md") == "conversation_20260602.md"
     assert mod._sanitize_export_filename("") == ""
 
 
-def test_gallery_replace_filename_sanitizer_uses_basename(monkeypatch):
-    mod = _import_gallery_routes_for_filename(monkeypatch)
+def test_gallery_replace_filename_sanitizer_uses_basename():
+    mod = _import_gallery_routes_for_filename()
 
     out = mod._sanitize_gallery_filename("../../etc/cron.d/evil image.png")
 
@@ -1086,7 +1122,7 @@ def test_gallery_replace_filename_sanitizer_uses_basename(monkeypatch):
 
 
 def test_gallery_replace_filename_sanitizer_falls_back_when_empty(monkeypatch):
-    mod = _import_gallery_routes_for_filename(monkeypatch)
+    mod = _import_gallery_routes_for_filename()
     monkeypatch.setattr(mod.uuid, "uuid4", lambda: types.SimpleNamespace(hex="abcdef1234567890"))
 
     assert mod._sanitize_gallery_filename("../") == "abcdef123456"

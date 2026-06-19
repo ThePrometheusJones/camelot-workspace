@@ -1,6 +1,6 @@
 ---
 name: odysseus
-description: Use when the user asks Codex to read or write Odysseus data from a terminal Codex session through the scoped Codex Agent API. Requires ODYSSEUS_URL and ODYSSEUS_API_TOKEN.
+description: Use when the user asks Codex to read or write Odysseus data (todos, email, calendar, memory, documents) or to launch/monitor/stop a Cookbook model-serve task through the scoped Codex Agent API. Requires ODYSSEUS_URL and ODYSSEUS_API_TOKEN.
 ---
 
 # Odysseus
@@ -102,8 +102,40 @@ python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/memory '{"tex
 
 ## Email draft + send
 
+- Prefer `POST /api/codex/emails/draft-document` for Codex-written email replies. It creates an editable Odysseus Document with `language: "email"` and does not touch IMAP/send.
 - `POST /api/codex/emails/draft` — body matches `SendEmailRequest` (`to`, `cc`, `bcc`, `subject`, `body`, `body_html`, `attachments`, `account_id`, `in_reply_to`, `references`). Requires `email:draft` (or `email:send`).
 - `POST /api/codex/emails/send` — same body. Requires `email:send`. Never send without explicit user instruction.
+
+## Cookbook serve (debug a failing model launch)
+
+The Cookbook surface lets you reproduce what a human would do in Odysseus → Cookbook: read which serves are running, tail their tmux output to see why they crashed, edit the launch command, relaunch, kill a stuck one. Use this when the user is debugging a model server that won't come up (compute-capability errors, OOM, missing kernels, wrong attention backend, etc.).
+
+- `GET /api/codex/cookbook/tasks` — list active serve/download/install tasks (sessionId, type, status, repo_id, remoteHost, payload._cmd). Requires `cookbook:read`.
+- `GET /api/codex/cookbook/servers` — list configured servers (name, host, port, env type + path, model dirs). Requires `cookbook:read`.
+- `GET /api/codex/cookbook/cached?host=<NAME>` — list models already cached on the named server (HF cache + Ollama + extra modelDirs). Call BEFORE `serve` to see what's already on disk. Requires `cookbook:read`.
+- `GET /api/codex/cookbook/presets` — list saved serve presets (model + host + port + cmd). The user's saved preset usually has a working cmd — try `preset NAME` before composing your own. Requires `cookbook:read`.
+- `GET /api/codex/cookbook/output/{session_id}?tail=400` — read the last N lines of the task's persistent log file (preferred) or tmux pane (fallback). The log file persists across vllm crashes, so this returns the actual Python traceback even after the bash prompt + neofetch banner overwrites the pane. Default tail=400. Requires `cookbook:read`.
+- `POST /api/codex/cookbook/serve` — launch a serve task. Body matches `ServeRequest`: `{ repo_id, cmd, remote_host?, ssh_port?, env_prefix?, gpus?, platform? }`. The `cmd` is validated: leading binary must be `vllm`/`python3`/`sglang`/`llama-server`/`ollama`/`node`/`npx`. NEVER prefix with `cd …`, `source …`, or chain with `&&`/`||`/`;`/`$(...)` — the validator rejects shell metacharacters. The venv activation (`env_prefix`) is added automatically from the host's saved settings, so pass the bare binary + args. Requires `cookbook:launch`.
+- `POST /api/codex/cookbook/preset/{name}` — launch a saved preset by name. Reuses the working cmd + host the user already saved. Requires `cookbook:launch`.
+- `POST /api/codex/cookbook/adopt` — register an externally-launched tmux session into cookbook tracking. Body: `{ tmux_session, model, host?, port? }`. Use this when serve_model rejected a cmd and you fell back to direct ssh+tmux — without adoption, the session is invisible to the UI. Requires `cookbook:launch`.
+- `POST /api/codex/cookbook/stop/{session_id}` — kill the tmux session. Requires `cookbook:launch`.
+
+```bash
+python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook tasks
+python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook output serve-abc12345 400
+python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook stop serve-abc12345
+python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook serve \
+  /mnt/HADES/models/Qwen3.5-397B-A17B-AWQ \
+  "vllm serve /mnt/HADES/models/Qwen3.5-397B-A17B-AWQ --host 0.0.0.0 --port 8001 --tensor-parallel-size 8 --max-model-len 262144 --gpu-memory-utilization 0.90 --dtype auto --max-num-seqs 8 --trust-remote-code --enable-expert-parallel --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3" \
+  pewds@192.168.1.12
+```
+
+**Debug loop pattern:** `tasks` → `output SID 600` (find root cause; request larger `tail` if it references "above") → `stop SID` → `serve repo "new cmd"` → wait ~20s → `output` on the new sessionId.
+
+**Hard limits this surface enforces:**
+- `cookbook serve` cmd allowlist + shell-metacharacter rejection.
+- `cookbook stop` requires sessionIds matching `[a-zA-Z0-9_-]+`.
+- Agent CAN spawn GPU-pinning long-lived processes — always `cookbook stop` your previous attempt before relaunching.
 
 ## Forbidden Bypass Pattern
 

@@ -504,8 +504,13 @@ const _CATEGORY_MAP = {
   ssh_command:          'System',
   run_script:           'System',
   run_local:            'System',
+  cookbook_serve:       'Cookbook',
 };
-const _CATEGORY_ORDER = ['Other', 'Calendar', 'Email', 'Chats', 'Documents', 'Memory', 'Research', 'Skills', 'Assistant', 'System'];
+// Cookbook serves listed FIRST so a just-saved schedule shows at the
+// top instead of scrolling off the bottom of the list. The remaining
+// order is preserved for backwards-compatibility with users who've
+// learned where things are.
+const _CATEGORY_ORDER = ['Cookbook', 'Other', 'Calendar', 'Email', 'Chats', 'Documents', 'Memory', 'Research', 'Skills', 'Assistant', 'System'];
 const _CATEGORY_ICONS = {
   Calendar:  '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   Email:     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
@@ -516,6 +521,8 @@ const _CATEGORY_ICONS = {
   Skills:    '<path d="M9 11l3 3L22 4"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v15H6.5A2.5 2.5 0 0 0 4 19.5z"/>',
   Assistant: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 18a5 5 0 0 1 10 0"/>',
   System:    '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+  // Cookbook icon — matches the recipe-book glyph used on the sidebar.
+  Cookbook:  '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
   Other:     '<circle cx="12" cy="12" r="3"/>',
 };
 
@@ -955,9 +962,13 @@ function _showPresetPicker() {
   let html = '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;"><h2 style="margin:0;padding:0;line-height:1;">Add Task</h2></div>';
   html += '<p class="memory-desc" style="position:relative;top:4px;">Describe a task for the AI to draft, or pick a type below to set one up manually.</p>';
-  html += '<div class="task-ai-compose" style="display:flex;gap:6px;margin:6px 0 10px;">'
-    + '<input type="text" id="task-ai-input" class="memory-search-input" style="flex:1;" placeholder="Describe a task — e.g. &quot;every weekday 7am summarize my unread email&quot;" />'
-    + '<button class="memory-toolbar-btn active" id="task-ai-btn" title="Draft a task with AI" style="white-space:nowrap;height:28px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Draft with AI</button>'
+  // flex-wrap + min-width:0 on the input lets the row collapse cleanly
+  // on narrow modal widths instead of pushing the AI button past the
+  // right edge. margin-left:-4px nudges the compose row 4px into the
+  // description bar above so the input lines up with it visually.
+  html += '<div class="task-ai-compose" style="display:flex;gap:6px;margin:6px 0 10px -4px;flex-wrap:wrap;align-items:center;">'
+    + '<input type="text" id="task-ai-input" class="memory-search-input" style="flex:1 1 220px;min-width:0;" placeholder="Describe a task — e.g. &quot;every weekday 7am summarize my unread email&quot;" />'
+    + '<button class="memory-toolbar-btn active" id="task-ai-btn" title="Draft a task with AI" style="white-space:nowrap;height:28px;flex:0 0 auto;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Draft with AI</button>'
     + '</div>';
   html += '<div class="memory-list" style="max-height:none;flex:1;gap:0px;margin-top:2px;padding-right:8px;">';
   _TASK_PRESETS.forEach((p, i) => {
@@ -1066,9 +1077,23 @@ function _showForm(existing, initTaskType, initTriggerType) {
     typeOpts.innerHTML = '';
     if (taskType === 'llm' || taskType === 'research') {
       const placeholder = taskType === 'research' ? 'What should be researched?' : 'What should the AI do?';
+      const _personaOpts = [
+        ['', 'Default (no persona)'],
+        ['socrates', 'Socrates'],
+        ['razor', 'Razor'],
+        ['nietzsche', 'Nietzsche'],
+        ['spark', 'Spark'],
+        ['odysseus', 'Odysseus'],
+      ];
+      const _curPersona = (existing?.character_id || '').toLowerCase();
+      const _personaOptsHtml = _personaOpts.map(([v, label]) =>
+        `<option value="${v}" ${v === _curPersona ? 'selected' : ''}>${label}</option>`).join('');
       typeOpts.innerHTML = `
         <label class="task-form-label">${taskType === 'research' ? 'Research question' : 'Prompt'}</label>
         <textarea id="task-form-prompt" class="task-form-input task-form-textarea" rows="4" placeholder="${placeholder}">${existing?.prompt || ''}</textarea>
+
+        <label class="task-form-label">Persona <span style="opacity:0.5;font-weight:normal;font-size:10px;">(optional — biases the output voice)</span></label>
+        <select id="task-form-persona" class="task-form-input">${_personaOptsHtml}</select>
       `;
     } else {
       typeOpts.innerHTML = `
@@ -1426,7 +1451,11 @@ function _showForm(existing, initTaskType, initTriggerType) {
         return;
       }
       payload.prompt = prompt;
+      const personaVal = document.getElementById('task-form-persona')?.value || '';
+      payload.character_id = personaVal;
     } else {
+      // Non-llm/research tasks: explicitly clear any persona on switch.
+      payload.character_id = '';
       const action = document.getElementById('task-form-action')?.value;
       if (!action) {
         if (uiModule) uiModule.showError('Select an action');
@@ -2471,12 +2500,15 @@ function _renderMainView() {
 
 // ---- Modal ----
 
-export function openTasks(focusId) {
+export function openTasks(focusId, opts) {
+  const o = opts || {};
   if (_open) {
-    // Already open — just focus the requested task.
+    // Already open — just focus the requested task / apply filter.
+    if (o.filter !== undefined) { _taskFilter = o.filter; _renderList(); }
     if (focusId) _focusTask(focusId);
     return;
   }
+  if (o.filter !== undefined) _taskFilter = o.filter;
   _pendingFocusTaskId = focusId || null;
   _open = true;
   _tasksCascadeNext = true;

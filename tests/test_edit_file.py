@@ -11,7 +11,7 @@ from src.tool_security import (
     is_public_blocked_tool,
     blocked_tools_for_owner,
 )
-from src.tool_execution import _do_edit_file, execute_tool_block
+from src.agent_tools.filesystem_tools import EditFileTool
 from src.agent_tools import ToolBlock
 
 
@@ -34,13 +34,20 @@ def test_blocked_tools_for_owner_includes_edit_file_for_non_admin(monkeypatch):
 @pytest.mark.asyncio
 async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
     # Execution-level gate: a non-admin owner must be refused even if the tool
-    # reaches execute_tool_block.
+    # reaches execute_tool_block. edit_file stays admin-gated by tool_security
+    # after #2684 (ALWAYS_AVAILABLE only changed advertisement, not execution).
+    #
+    # Resolve execute_tool_block from the live module object (te) rather than a
+    # top-level import: other test modules pop src.tool_execution from
+    # sys.modules and re-import it, so a stale top-level reference would call a
+    # different module's function than the one monkeypatch targets — silently
+    # bypassing the admin gate.
     import src.tool_execution as te
     monkeypatch.setattr(te, "_owner_is_admin", lambda owner: False)
     ws = tempfile.mkdtemp()
     p = os.path.join("/tmp", "ef_block.txt")
     open(p, "w").write("a\n")
-    _desc, result = await execute_tool_block(
+    _desc, result = await te.execute_tool_block(
         ToolBlock("edit_file", json.dumps({"path": p, "old_string": "a", "new_string": "b"})),
         owner="bob",
     )
@@ -53,7 +60,7 @@ async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
 async def test_edit_file_success():
     p = os.path.join("/tmp", "ef_ok.py")
     open(p, "w").write("def f():\n    return 1\n")
-    res = await _do_edit_file(json.dumps({"path": p, "old_string": "return 1", "new_string": "return 2"}))
+    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "return 1", "new_string": "return 2"}), {})
     assert res["exit_code"] == 0
     assert open(p).read() == "def f():\n    return 2\n"
     assert res["diff"]["added"] == 1 and res["diff"]["removed"] == 1 and res["diff"]["file"] == "ef_ok.py"
@@ -64,7 +71,7 @@ async def test_edit_file_success():
 async def test_edit_file_not_found():
     p = os.path.join("/tmp", "ef_nf.txt")
     open(p, "w").write("hello\n")
-    res = await _do_edit_file(json.dumps({"path": p, "old_string": "nope", "new_string": "x"}))
+    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "nope", "new_string": "x"}), {})
     assert res["exit_code"] == 1 and "not found" in res["error"]
     os.unlink(p)
 
@@ -73,15 +80,15 @@ async def test_edit_file_not_found():
 async def test_edit_file_non_unique():
     p = os.path.join("/tmp", "ef_dup.txt")
     open(p, "w").write("x\nx\n")
-    res = await _do_edit_file(json.dumps({"path": p, "old_string": "x", "new_string": "y"}))
+    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y"}), {})
     assert res["exit_code"] == 1 and "not unique" in res["error"]
     # replace_all resolves it
-    res = await _do_edit_file(json.dumps({"path": p, "old_string": "x", "new_string": "y", "replace_all": True}))
+    res = await EditFileTool().execute(json.dumps({"path": p, "old_string": "x", "new_string": "y", "replace_all": True}), {})
     assert res["exit_code"] == 0 and open(p).read() == "y\ny\n"
     os.unlink(p)
 
 
 @pytest.mark.asyncio
 async def test_edit_file_outside_allowed_roots():
-    res = await _do_edit_file(json.dumps({"path": "/etc/hosts", "old_string": "x", "new_string": "y"}))
+    res = await EditFileTool().execute(json.dumps({"path": "/etc/hosts", "old_string": "x", "new_string": "y"}), {})
     assert res["exit_code"] == 1 and ("outside the allowed roots" in res["error"] or "sensitive" in res["error"])

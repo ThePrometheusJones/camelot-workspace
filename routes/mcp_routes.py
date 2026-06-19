@@ -13,7 +13,7 @@ import httpx
 
 from core.database import McpServer, SessionLocal
 from core.middleware import require_admin
-from src.constants import DATA_DIR
+from src.constants import DATA_DIR, MCP_OAUTH_DIR
 from src.mcp_manager import McpManager
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 def _mcp_oauth_base_dir() -> Path:
     """Directory that may contain OAuth files managed by Odysseus."""
-    return (Path(DATA_DIR) / "mcp_oauth").resolve(strict=False)
+    return Path(MCP_OAUTH_DIR).resolve(strict=False)
 
 
 def _resolve_mcp_oauth_path(raw_path, field_name: str) -> str:
@@ -108,6 +108,12 @@ def _load_disabled_map():
         db.close()
 
 
+def _mcp_oauth_redirect_uri() -> str:
+    """Shared callback URL for legacy Google and generic MCP OAuth flows."""
+    from src.mcp_oauth import REDIRECT_URI
+    return REDIRECT_URI
+
+
 def setup_mcp_routes(mcp_manager: McpManager):
     """Setup MCP routes with the provided manager."""
 
@@ -141,6 +147,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     "disabled_tool_count": len(disabled_list),
                     "enabled_tool_count": max(0, total_tools - len(disabled_list)),
                     "error": status.get("error"),
+                    "auth_url": status.get("auth_url"),
                     "has_oauth": oauth_cfg is not None,
                     "needs_oauth": needs_oauth,
                 })
@@ -171,6 +178,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
             raise HTTPException(400, "command is required for stdio transport")
         if transport == "sse" and not url:
             raise HTTPException(400, "url is required for SSE transport")
+        if transport == "http" and not url:
+            raise HTTPException(400, "url is required for HTTP transport")
 
         # Parse JSON fields
         try:
@@ -262,6 +271,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
             )
 
         status = mcp_manager.get_server_status(server_id)
+        needs_auth = status.get("status") == "needs_auth"
         return {
             "id": server_id,
             "name": name,
@@ -270,6 +280,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
             "tool_count": status.get("tool_count", 0),
             "error": "OAuth authorization required" if needs_oauth else status.get("error"),
             "needs_oauth": needs_oauth,
+            "needs_auth": needs_auth,
+            "auth_url": status.get("auth_url"),
         }
 
     @router.post("/servers/{server_id}/reconnect")
@@ -302,6 +314,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 "status": status.get("status", "disconnected"),
                 "tool_count": status.get("tool_count", 0),
                 "error": status.get("error"),
+                "auth_url": status.get("auth_url"),
+                "needs_auth": status.get("status") == "needs_auth",
             }
         finally:
             db.close()
@@ -437,9 +451,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
             client_id = keys["client_id"]
             scopes = oauth_cfg.get("scopes", [])
 
-            # For Desktop App creds, redirect to localhost — the user will
+            # For Desktop App creds, default to localhost — the user will
             # paste the resulting URL back if they're on a different device.
-            redirect_uri = "http://localhost:7000/api/mcp/oauth/callback"
+            redirect_uri = _mcp_oauth_redirect_uri()
 
             params = {
                 "client_id": client_id,
@@ -461,16 +475,24 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 return RedirectResponse(auth_url)
             else:
                 # Remote device — show paste-back page
-                return HTMLResponse(_oauth_authorize_page(auth_url, server_id, host))
+                return HTMLResponse(_oauth_authorize_page(auth_url, server_id, host, redirect_uri))
         finally:
             db.close()
 
     @router.get("/oauth/callback")
     async def oauth_callback(code: str, state: str, request: Request):
-        """Handle OAuth callback from Google — exchange code for tokens."""
+        """Handle OAuth callback. Generic MCP OAuth flows resolve via the
+        pending-state registry; Google flows fall through to the legacy path."""
         require_admin(request)
-        server_id = state
-        return await _exchange_and_connect(server_id, code, request)
+        from src.mcp_oauth import resolve_pending
+        if resolve_pending(state, code):
+            return HTMLResponse(_oauth_result_page(
+                "Authorization Successful",
+                "The MCP server is connecting. You can close this window and return to Odysseus.",
+                success=True,
+            ))
+        # Legacy Google path: state is the server_id
+        return await _exchange_and_connect(state, code, request)
 
     @router.post("/oauth/exchange/{server_id}")
     async def oauth_exchange(server_id: str, request: Request, callback_url: str = Form(...)):
@@ -484,6 +506,17 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 return HTMLResponse(_oauth_result_page("Error", "No authorization code found in the URL. Make sure you copied the full URL from your browser."), status_code=400)
         except Exception:
             return HTMLResponse(_oauth_result_page("Error", "Invalid URL format."), status_code=400)
+
+        # Generic MCP OAuth: if the pasted URL carries a state we are waiting on,
+        # resolve it directly (the background connect finishes the handshake).
+        state = params.get("state", [None])[0]
+        from src.mcp_oauth import resolve_pending
+        if state and resolve_pending(state, code):
+            return HTMLResponse(_oauth_result_page(
+                "Authorization Successful",
+                "The MCP server is connecting. You can close this window and return to Odysseus.",
+                success=True,
+            ))
 
         return await _exchange_and_connect(server_id, code, request)
 
@@ -509,7 +542,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
             client_id = keys["client_id"]
             client_secret = keys["client_secret"]
 
-            redirect_uri = "http://localhost:7000/api/mcp/oauth/callback"
+            redirect_uri = _mcp_oauth_redirect_uri()
 
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -576,13 +609,19 @@ def setup_mcp_routes(mcp_manager: McpManager):
     return router
 
 
-def _oauth_authorize_page(auth_url: str, server_id: str, host: str) -> str:
+def _oauth_authorize_page(
+    auth_url: str,
+    server_id: str,
+    host: str,
+    redirect_uri: str = "http://localhost:7000/api/mcp/oauth/callback",
+) -> str:
     """Page with Google sign-in link and URL paste-back form for remote access."""
     # Escape values interpolated into the page: `host` comes from the request
     # Host header and `server_id` from the OAuth state — neither is trusted.
     auth_url = html.escape(auth_url, quote=True)
     server_id = html.escape(server_id, quote=True)
     host = html.escape(host, quote=True)
+    redirect_uri = html.escape(redirect_uri, quote=True)
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><title>Authorize — Odysseus</title>
@@ -627,7 +666,7 @@ def _oauth_authorize_page(auth_url: str, server_id: str, host: str) -> str:
   <div class="divider"></div>
   <form method="POST" action="http://{host}/api/mcp/oauth/exchange/{server_id}">
     <p>Paste the URL from your browser after signing in:</p>
-    <input type="text" name="callback_url" placeholder="http://localhost:7000/api/mcp/oauth/callback?code=..." required>
+    <input type="text" name="callback_url" placeholder="{redirect_uri}?code=..." required>
     <br><button type="submit">Connect</button>
   </form>
 </div></body></html>"""
