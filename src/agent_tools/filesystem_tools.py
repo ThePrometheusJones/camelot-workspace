@@ -3,6 +3,7 @@ import json
 import os
 import difflib
 import fnmatch
+import re
 import shutil
 from typing import Optional, Dict, Any, Tuple
 
@@ -15,6 +16,32 @@ _CODENAV_SKIP_DIRS = frozenset({
 })
 _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
+
+
+def _glob_to_regex(pat: str) -> "re.Pattern":
+    """Translate a forward-slash glob (**, *, ?) into a compiled regex.
+    `**/` matches zero or more complete directories.
+    `*` matches within a single path segment (does not cross /).
+    """
+    i, n, out = 0, len(pat), []
+    while i < n:
+        if pat[i : i + 3] == "**/":
+            out.append("(?:[^/]+/)*")
+            i += 3
+        elif pat[i : i + 2] == "**":
+            out.append(".*")
+            i += 2
+        elif pat[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    return re.compile("".join(out))
+
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
@@ -240,7 +267,13 @@ class LsTool:
 
 class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import (
+            _SENSITIVE_BASENAMES,
+            _is_sensitive_path,
+            _resolve_tool_path,
+            _resolve_search_root,
+            _truncate,
+        )
         args = {}
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -263,17 +296,46 @@ class GlobTool:
             base = Path(root)
             if not base.is_dir():
                 return None, f"glob: {root}: not a directory"
+            rbase = os.path.realpath(base)
+            norm_pat = pattern.replace("\\", "/")
+            # Fast path: literal pattern (no wildcards) → direct path lookup.
+            if not any(c in norm_pat for c in "*?["):
+                cand = os.path.realpath(os.path.join(base, norm_pat))
+                nbase = os.path.normcase(rbase)
+                try:
+                    inside = cand == rbase or os.path.commonpath(
+                        [os.path.normcase(cand), nbase]
+                    ) == nbase
+                except ValueError:
+                    inside = False
+                if inside and os.path.exists(cand) and not _is_sensitive_path(cand):
+                    return [cand], None
+            # Compile glob to regex: * stays within one segment, **/ spans dirs.
+            regex = _glob_to_regex(norm_pat)
+            cap = _CODENAV_MAX_HITS * 5
             matched = []
             try:
-                for p in base.rglob(pattern):
-                    if set(p.relative_to(base).parts) & _CODENAV_SKIP_DIRS:
-                        continue
-                    try:
-                        mtime = p.stat().st_mtime
-                    except OSError:
-                        mtime = 0
-                    matched.append((mtime, str(p)))
-                    if len(matched) > _CODENAV_MAX_HITS * 5:
+                for dp, dns, fns in os.walk(base):
+                    # Prune skipped dirs before descending (unlike rglob which
+                    # descends first then filters — fatal on large node_modules).
+                    # Sensitive dirs (.ssh, .gnupg, …) are pruned too so glob
+                    # never enumerates the keys/tokens inside them.
+                    dns[:] = [
+                        d for d in dns
+                        if d not in _CODENAV_SKIP_DIRS and d not in _SENSITIVE_BASENAMES
+                    ]
+                    for name in fns + dns:
+                        full = os.path.join(dp, name)
+                        rel = os.path.relpath(full, base).replace(os.sep, "/")
+                        if regex.fullmatch(rel) or regex.fullmatch(name):
+                            if _is_sensitive_path(os.path.realpath(full)):
+                                continue
+                            try:
+                                mtime = os.stat(full).st_mtime
+                            except OSError:
+                                mtime = 0
+                            matched.append((mtime, full))
+                    if len(matched) > cap:
                         break
             except (OSError, ValueError) as _e:
                 return None, f"glob: {_e}"

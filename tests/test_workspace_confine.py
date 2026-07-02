@@ -141,6 +141,49 @@ async def test_grep_and_ls_confined_e2e(ws, admin):
 
 
 @pytest.mark.asyncio
+async def test_glob_confined_e2e(ws, admin):
+    """glob's literal fast-path must stay inside the workspace."""
+    with open(os.path.join(ws, "found.py"), "w") as f:
+        f.write("x")
+    _, r = await execute_tool_block(_block("glob", json.dumps({"pattern": "found.py"})), owner="a", workspace=ws)
+    assert r["exit_code"] == 0 and "found.py" in r["output"]
+
+    outside = tempfile.mkdtemp()
+    secret = os.path.join(outside, "secret.txt")
+    with open(secret, "w") as f:
+        f.write("nope")
+    rel = os.path.relpath(secret, os.path.realpath(ws))
+    _, r = await execute_tool_block(_block("glob", json.dumps({"pattern": rel})), owner="a", workspace=ws)
+    assert r["exit_code"] == 0 and "No files" in r["output"] and secret not in r["output"]
+    _, r = await execute_tool_block(_block("glob", json.dumps({"pattern": secret})), owner="a", workspace=ws)
+    assert r["exit_code"] == 0 and "No files" in r["output"]
+
+
+@pytest.mark.asyncio
+async def test_glob_skips_sensitive_files_in_workspace(ws, admin):
+    """glob must not enumerate deny-listed sensitive files."""
+    with open(os.path.join(ws, "keep.py"), "w") as f:
+        f.write("x")
+    with open(os.path.join(ws, ".env"), "w") as f:
+        f.write("AWS_SECRET=xxx")
+    with open(os.path.join(ws, "id_rsa"), "w") as f:
+        f.write("KEY")
+    os.makedirs(os.path.join(ws, ".ssh"), exist_ok=True)
+    with open(os.path.join(ws, ".ssh", "authorized_keys"), "w") as f:
+        f.write("ssh-rsa AAAA")
+
+    _, r = await execute_tool_block(_block("glob", json.dumps({"pattern": "**/*"})), owner="a", workspace=ws)
+    assert r["exit_code"] == 0
+    assert "keep.py" in r["output"]
+    for leak in (".env", "id_rsa", "authorized_keys"):
+        assert leak not in r["output"], f"glob leaked sensitive file: {leak}"
+
+    for pat in (".env", "**/id_rsa", "**/authorized_keys"):
+        _, r = await execute_tool_block(_block("glob", json.dumps({"pattern": pat})), owner="a", workspace=ws)
+        assert r["exit_code"] == 0 and "No files" in r["output"]
+
+
+@pytest.mark.asyncio
 async def test_subprocess_cwd_is_workspace_e2e(ws, admin):
     """python tool runs with cwd = workspace (OS-agnostic probe)."""
     _, r = await execute_tool_block(_block("python", "import os; print(os.getcwd())"), owner="a", workspace=ws)
