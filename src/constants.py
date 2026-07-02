@@ -63,10 +63,20 @@ MAX_OUTPUT_CHARS = 10_000       # cap for bash/python/web_search/web_fetch outpu
 MAX_READ_CHARS = 20_000         # cap for read_file / document preview
 MAX_DIFF_LINES = 400            # cap for edit_file unified-diff display
 
+WEB_FETCH_SOFT_MAX_BYTES = 2_000_000    # default download budget (2 MB)
+WEB_FETCH_HARD_MAX_BYTES = 20_000_000   # absolute ceiling, even with override (20 MB)
+
 # API Configuration
 MAX_CONTEXT_MESSAGES = 90
 REQUEST_TIMEOUT = 20
 OPENAI_COMPAT_PATH = "/v1/chat/completions"
+
+# Outbound UA for web_fetch / web_search scraping
+WEB_FETCH_USER_AGENT = os.environ.get(
+    "WEB_FETCH_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+)
 
 # Environment variables with defaults
 DEFAULT_HOST = os.getenv("LLM_HOST", "localhost")
