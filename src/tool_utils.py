@@ -37,3 +37,36 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(text) > limit:
         return text[:limit] + f"\n... (truncated, {len(text)} chars total)"
     return text
+
+
+
+def _parse_tool_args(content):
+    """Parse a tool-call argument blob.
+
+    Accepts either a JSON string or an already-decoded dict. Unwraps the
+    common `{"body": {...}}` envelope that smaller models emit when they
+    read tool descriptions like "Body is JSON: {...}" literally and
+    pass `body` as a field name rather than treating it as a noun.
+
+    Returns a dict on success, raises ValueError on bad JSON.
+    """
+    if isinstance(content, str):
+        try:
+            args = json.loads(content) if content.strip() else {}
+            if not isinstance(args, dict):
+                args = {}
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(str(e))
+    elif isinstance(content, dict):
+        args = content
+    else:
+        args = {}
+    if (
+        isinstance(args, dict)
+        and len(args) == 1
+        and "body" in args
+        and isinstance(args["body"], dict)
+        and "action" in args["body"]
+    ):
+        args = args["body"]
+    return args
