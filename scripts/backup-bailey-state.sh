@@ -34,7 +34,7 @@ VAULT_DB="/home/ken/.hermes/vault_recall.db"
 CHROMA_DIR="${REPO}/data/chroma"             # host bind-mount of the volume
 ENV_FILE="${REPO}/.env"
 
-NAS="100.79.19.107"                          # OptiPlex NAS over Tailscale
+NAS="100.84.12.22"                          # OptiPlex NAS over Tailscale
 NAS_USER="ken"
 NAS_PATH="/tank/backups/bailey"              # zfs dataset on the active pool
 
