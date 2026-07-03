@@ -21,6 +21,8 @@ import smtplib
 import json
 import re
 import html
+import io
+import zipfile
 from html.parser import HTMLParser as _HTMLParser
 import logging
 import uuid
@@ -31,7 +33,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from src.constants import DATA_DIR
 
 from src.llm_core import llm_call_async
@@ -58,6 +60,30 @@ from routes.email_pollers import _start_poller
 logger = logging.getLogger(__name__)
 
 ODYSSEUS_MAIL_ORIGIN = "odysseus-ui"
+EMAIL_READ_ATTACHMENT_VERSION = 2
+
+
+def _safe_attachment_zip_name(name: str, fallback: str) -> str:
+    """Return a zip entry filename without path traversal or empty names."""
+    base = Path(str(name or "")).name.strip() or fallback
+    base = re.sub(r"[\x00-\x1f\x7f]+", "_", base)
+    base = base.replace("/", "_").replace("\\", "_").strip(". ") or fallback
+    return base[:180] or fallback
+
+
+def _coerce_port(value, default):
+    """Coerce a user-supplied port to int.
+
+    Returns ``(port, error)``. A missing or blank value yields ``default``; a
+    non-numeric value yields ``(None, message)`` so callers can return a clean
+    error instead of letting ``int()`` raise and surface as an HTTP 500.
+    """
+    if value in (None, ""):
+        return default, None
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return None, f"Invalid port {value!r}; must be a whole number"
 
 
 def _email_tag_owner_aliases(account_id: str | None, owner: str = "") -> list[str]:
@@ -1501,6 +1527,110 @@ def setup_email_routes():
             )
         except Exception as e:
             logger.error(f"Failed to download attachment {uid}/{index}: {e}")
+            return {"error": "Mail operation failed"}
+
+    @router.get("/attachments-download/{uid}")
+    async def download_all_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+        """Download all visible attachments for an email as a zip archive."""
+        try:
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder), readonly=True)
+                status, msg_data = _imap_uid_fetch(conn, uid, "(RFC822)")
+            if status != "OK":
+                raise HTTPException(status_code=404, detail="Email not found")
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+            attachments = [
+                att for att in _list_attachments_from_msg(msg)
+                if not _is_likely_signature_image_attachment(att)
+            ]
+            if not attachments:
+                raise HTTPException(status_code=404, detail="No downloadable attachments")
+
+            target_dir = attachment_extract_dir(folder, uid)
+            zip_buf = io.BytesIO()
+            used_names: dict[str, int] = {}
+            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for att in attachments:
+                    idx = att.get("index")
+                    if idx is None:
+                        continue
+                    filepath = _extract_attachment_to_disk(msg, int(idx), target_dir)
+                    if not filepath or not Path(filepath).exists():
+                        continue
+                    fallback = f"attachment-{idx}"
+                    arcname = _safe_attachment_zip_name(att.get("filename") or Path(filepath).name, fallback)
+                    stem = Path(arcname).stem
+                    suffix = Path(arcname).suffix
+                    seen = used_names.get(arcname, 0)
+                    used_names[arcname] = seen + 1
+                    if seen:
+                        arcname = f"{stem}-{seen + 1}{suffix}"
+                    zf.write(str(filepath), arcname)
+            zip_buf.seek(0)
+            if not zip_buf.getbuffer().nbytes:
+                raise HTTPException(status_code=404, detail="No downloadable attachments")
+            zip_name = _safe_attachment_zip_name(f"email-{uid}-attachments.zip", "attachments.zip")
+            return StreamingResponse(
+                zip_buf,
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to download attachments zip {uid}: {e}")
+            raise HTTPException(status_code=500, detail="Mail operation failed")
+
+    @router.get("/inline-image/{uid}")
+    async def inline_image(
+        uid: str,
+        cid: str = Query(...),
+        folder: str = Query("INBOX"),
+        account_id: str | None = Query(None),
+        owner: str = Depends(require_owner),
+    ):
+        """Serve an inline MIME image by Content-ID after the user explicitly clicks Load."""
+        want = (cid or "").strip().strip("<>")
+        if not want:
+            raise HTTPException(status_code=400, detail="Missing image Content-ID")
+        try:
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder), readonly=True)
+                status, msg_data = _imap_uid_fetch(conn, uid, "(RFC822)")
+            if status != "OK":
+                raise HTTPException(status_code=404, detail="Email not found")
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+            idx = 0
+            for part in msg.walk():
+                cd = str(part.get("Content-Disposition", ""))
+                ct = part.get_content_type()
+                is_attached_email = ct == "message/rfc822" and ("attachment" in cd.lower() or part.get_filename())
+                if part.is_multipart() and not is_attached_email:
+                    continue
+                if ct in ("text/plain", "text/html") and "attachment" not in cd:
+                    continue
+                content_id = (part.get("Content-ID") or "").strip().strip("<>")
+                if content_id != want:
+                    idx += 1
+                    continue
+                if not ct.lower().startswith("image/"):
+                    raise HTTPException(status_code=415, detail="Content-ID is not an image")
+                target_dir = attachment_extract_dir(folder, uid)
+                filepath = _extract_attachment_to_disk(msg, idx, target_dir)
+                if not filepath:
+                    raise HTTPException(status_code=404, detail="Inline image not found")
+                return FileResponse(
+                    path=str(filepath),
+                    media_type=ct,
+                    headers={"Content-Disposition": f'inline; filename="{filepath.name}"'},
+                )
+            raise HTTPException(status_code=404, detail="Inline image not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to load inline image {uid}/{want}: {e}")
             return {"error": "Mail operation failed"}
 
     @router.post("/attachment-as-doc/{uid}/{index}")

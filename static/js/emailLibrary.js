@@ -4551,6 +4551,63 @@ function _wireAttachmentHandlers(reader, folder) {
   // a ReferenceError when this fn is called from contexts that don't have
   // _isMobileUA in scope (e.g. _openEmailAsTab, _openEmailWindow).
   const _isMobileUA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  reader.querySelectorAll('.email-attachments-download-all').forEach(btn => {
+    if (btn.dataset.wired === '1') return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (btn.dataset.downloading === '1') return;
+      const uid = btn.dataset.attUid;
+      const sourceFolder = btn.dataset.attFolder || useFolder;
+      const count = Number(btn.dataset.attCount || 0);
+      if (!uid) return;
+      const originalHtml = btn.innerHTML;
+      const originalTitle = btn.title;
+      btn.dataset.downloading = '1';
+      btn.classList.add('is-loading');
+      try {
+        const sp = window.spinnerModule || (await import('./spinner.js')).default;
+        const wp = sp.createWhirlpool(12);
+        wp.element.style.margin = '0';
+        btn.textContent = '';
+        btn.appendChild(wp.element);
+        const label = document.createElement('span');
+        label.textContent = 'All';
+        btn.appendChild(label);
+      } catch (_) {
+        btn.textContent = 'All...';
+      }
+      try {
+        const url = `${API_BASE}/api/email/attachments-download/${encodeURIComponent(uid)}?folder=${encodeURIComponent(sourceFolder)}${_acct()}`;
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          console.error('attachments zip download failed', res.status, msg);
+          location.href = url;
+          return;
+        }
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `email-${uid}-attachments.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        try { uiModule.showToast && uiModule.showToast(`Downloading ${count || 'all'} attachments`); } catch (_) {}
+      } catch (e) {
+        console.error('attachments zip download error', e);
+        try { const { showError } = await import('./ui.js'); showError('Could not download attachments'); } catch (_) {}
+      } finally {
+        delete btn.dataset.downloading;
+        btn.classList.remove('is-loading');
+        btn.title = originalTitle;
+        btn.innerHTML = originalHtml;
+      }
+    });
+  });
   reader.querySelectorAll('.email-attachment-open').forEach(openBtn => {
     if (openBtn.dataset.wired === '1') return;
     openBtn.dataset.wired = '1';
@@ -4698,25 +4755,55 @@ function _isLikelySignatureImage(a) {
 // Build the attachments header+chips HTML for an email read response. Pulled
 // out so both the initial-open and the swap-reader paths can render it.
 function _buildAttsHtmlFor(uid, data) {
-  if (!data || !data.attachments || !data.attachments.length) return '';
-  const _OPENABLE_RE = /\.(pdf|docx|txt|md|markdown)$/i;
-  const visible = data.attachments.filter(a => !_isLikelySignatureImage(a));
-  if (!visible.length) return '';
-  const chips = visible.map(a => {
+  if (!data) return '';
+  const _OPENABLE_RE = /\.(pdf|docx|txt|md|markdown|eml)$/i;
+  const currentAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+  const relatedAttachments = Array.isArray(data.related_attachments) ? data.related_attachments : [];
+  if (!currentAttachments.length && !relatedAttachments.length) return '';
+  const visible = currentAttachments.filter(a => !_isLikelySignatureImage(a));
+  const hidden = currentAttachments.filter(a => _isLikelySignatureImage(a));
+  const related = relatedAttachments.filter(a => !_isLikelySignatureImage(a));
+  const renderChip = (a, extraClass = '') => {
     const openable = _OPENABLE_RE.test(a.filename || '');
+    const chipUid = a.source_uid || a.uid || uid;
+    const chipFolder = a.source_folder || data.folder || state._libFolder || 'INBOX';
     const openBtn = openable
-      ? `<span class="email-attachment-open" title="Open in document editor" data-open-uid="${_esc(uid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg><span class="email-attachment-open-label">Open</span></span>`
+      ? `<span class="email-attachment-open" title="Open in document editor" data-open-uid="${_esc(chipUid)}" data-open-index="${a.index}" data-open-name="${_esc(a.filename)}" data-open-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="8" y1="9" x2="10" y2="9"/></svg><span class="email-attachment-open-label">Open</span></span>`
       : '';
-    return `<button type="button" class="email-attachment-chip" data-att-uid="${_esc(uid)}" data-att-index="${a.index}" data-att-name="${_esc(a.filename)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_esc(a.filename)}</span><span class="att-size">${Math.round((a.size||0)/1024)} KB</span>${openBtn}</button>`;
-  }).join('');
+    return `<button type="button" class="email-attachment-chip${extraClass}" data-att-uid="${_esc(chipUid)}" data-att-index="${a.index}" data-att-name="${_esc(a.filename)}" data-att-folder="${_esc(chipFolder)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_esc(a.filename)}</span><span class="att-size">${Math.round((a.size||0)/1024)} KB</span>${openBtn}</button>`;
+  };
+  const chips = visible.map(a => renderChip(a)).join('');
+  const hiddenChips = hidden.map(a => renderChip(a, ' email-attachment-chip-muted')).join('');
+  const relatedChips = related.map(a => renderChip(a, ' email-attachment-chip-related')).join('');
+  const visibleSection = visible.length
+    ? '<div class="email-reader-atts">' + chips + '</div>'
+    : '';
+  const relatedSection = related.length
+    ? '<div class="email-reader-atts-hidden-note">From earlier in this thread</div><div class="email-reader-atts email-reader-atts-related">' + relatedChips + '</div>'
+    : '';
+  const hiddenSection = hidden.length
+    ? '<div class="email-reader-atts-hidden-note">Filtered inline images / signature files</div><div class="email-reader-atts email-reader-atts-hidden">' + hiddenChips + '</div>'
+    : '';
+  const label = visible.length
+    ? `Attachments (${visible.length + related.length})`
+    : related.length
+      ? `Thread attachments (${related.length})`
+      : `Hidden inline attachments (${hidden.length})`;
+  const startCollapsed = !visible.length && !related.length;
+  const downloadAllBtn = visible.length > 4
+    ? `<button type="button" class="email-attachments-download-all" title="Download all attachments" data-att-uid="${_esc(uid)}" data-att-folder="${_esc(data.folder || state._libFolder || 'INBOX')}" data-att-count="${visible.length}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>All</span></button>`
+    : '';
   return (
-    '<div class="email-reader-atts-wrap collapsed">'
+    `<div class="email-reader-atts-wrap${startCollapsed ? ' collapsed' : ''}">`
     +   '<div class="email-reader-atts-header email-summary-toggle" role="button" tabindex="0">'
     +     '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>'
-    +     `<span>Attachments (${data.attachments.length})</span>`
+    +     `<span>${label}</span>`
+    +     downloadAllBtn
     +     '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
     +   '</div>'
-    +   '<div class="email-reader-atts">' + chips + '</div>'
+    +   visibleSection
+    +   relatedSection
+    +   hiddenSection
     + '</div>'
   );
 }
