@@ -51,7 +51,7 @@ When cherry-picking upstream updates, check these files for conflicts.
 ## Configuration
 | File | Notes |
 |------|-------|
-| `.env` | Camelot-specific: SearXNG on :8889, ChromaDB on :8100, LOCALHOST_BYPASS=true |
+| `.env` | Camelot-specific: SearXNG on :8889, ChromaDB on :8100, LOCALHOST_BYPASS=false |
 | `data/settings.json` | tts_provider=fish_speech, voice=gwen_ref |
 | `data/presets.json` | Generated at runtime with "guinevere" preset |
 
@@ -67,3 +67,22 @@ When cherry-picking upstream updates, check these files for conflicts.
 3. Cherry-pick individual commits: `git cherry-pick <hash>`
 4. If conflict in a modified file above, manually resolve preserving our changes
 5. Test after merge: `curl http://localhost:7000/api/tts/stats` + `curl http://localhost:7000/api/presets`
+
+### Security (added 2026-07-03)
+| File | Change |
+|------|--------|
+| `src/url_guard.py` | **NEW** — SSRF guard: blocks localhost, RFC1918, tailnet (100.64/10), link-local, lab hostnames before any agent fetch |
+| `src/agent_tools/web_tools.py` | SSRF guard wired before `fetch_webpage_content` in `WebFetchTool.execute()` |
+| `src/deep_research.py` | SSRF guard wired before deep-research URL fetch |
+
+### Database (added 2026-07-03)
+| File | Change |
+|------|--------|
+| `core/database.py` | Added WAL, busy_timeout=5000, synchronous=NORMAL to existing `set_sqlite_pragma` hook. Merge-risk: LOW (upstream hook exists, just add lines) |
+
+### Infrastructure (added 2026-07-03)
+| File | Change |
+|------|--------|
+| `scripts/wait-for-tailscale.sh` | **NEW** — ExecStartPre: blocks until Tailscale IP is kernel-bindable |
+| `camelot-workspace.service` | Revised: KillMode=control-group, MemoryHigh=3G/MemoryMax=5G, wait-for-tailscale pre-step, fuser retired |
+| `mcp_servers/email_server.py` | Added `add_email_account` MCP tool |
