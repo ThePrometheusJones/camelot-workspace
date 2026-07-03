@@ -75,6 +75,12 @@ class WebFetchTool:
             return {"error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}", "exit_code": 1}
         if not low.startswith(("http://", "https://")):
             url = "https://" + url
+        # SSRF guard: block internal/tailnet targets before any fetch
+        from src.url_guard import assert_url_allowed, GuardedURLError
+        try:
+            assert_url_allowed(url)
+        except GuardedURLError as e:
+            return {"error": f"web_fetch: URL blocked by policy: {e}", "exit_code": 1}
         loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(

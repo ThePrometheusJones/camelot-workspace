@@ -1893,6 +1893,34 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="add_email_account",
+            description=(
+                "Register a new IMAP/SMTP email account so Odysseus can read and send "
+                "from it. Provide host/port/credentials for both IMAP and SMTP. "
+                "Passwords are encrypted at rest. After adding, use list_email_accounts "
+                "to verify, then list_emails with account= to test connectivity."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short label, e.g. 'iCloud', 'Work Gmail'"},
+                    "imap_host": {"type": "string"},
+                    "imap_port": {"type": "integer", "default": 993},
+                    "imap_user": {"type": "string", "description": "IMAP login username (usually the full email address)"},
+                    "imap_password": {"type": "string", "description": "App-specific or Bridge password"},
+                    "imap_starttls": {"type": "boolean", "description": "True for STARTTLS (port 143/1143), false for implicit SSL (port 993)", "default": False},
+                    "smtp_host": {"type": "string"},
+                    "smtp_port": {"type": "integer", "default": 587},
+                    "smtp_security": {"type": "string", "enum": ["STARTTLS", "SSL", "NONE"], "default": "STARTTLS"},
+                    "smtp_user": {"type": "string", "description": "SMTP login (usually same as imap_user)"},
+                    "smtp_password": {"type": "string", "description": "SMTP password (usually same as imap_password)"},
+                    "from_address": {"type": "string", "description": "From address for outgoing mail"},
+                    "is_default": {"type": "boolean", "default": False},
+                },
+                "required": ["name", "imap_host", "imap_user", "imap_password", "smtp_host", "smtp_user", "smtp_password", "from_address"],
+            },
+        ),
+        Tool(
             name="read_email",
             description=(
                 "Read the full content of a specific email. "
@@ -2277,6 +2305,53 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text=f"No matching UIDs found in {folder}; 0 of {requested_n} email(s) {verb}.")]
             suffix = "" if changed_n == requested_n else f" ({changed_n} of {requested_n} requested UIDs matched)"
             return [TextContent(type="text", text=f"Done — {changed_n} email(s) {verb}{suffix}.")]
+
+        elif name == "add_email_account":
+            acct_name = (arguments.get("name") or "").strip()
+            if not acct_name:
+                return [TextContent(type="text", text="Error: name is required")]
+            from src.secret_storage import encrypt as _enc
+            db_path = _db_path()
+            now = datetime.now().isoformat()
+            acct_id = uuid.uuid4().hex
+            imap_pw = _enc(arguments.get("imap_password") or "")
+            smtp_pw = _enc(arguments.get("smtp_password") or "")
+            smtp_sec = (arguments.get("smtp_security") or "STARTTLS").upper()
+            if smtp_sec not in ("STARTTLS", "SSL", "NONE"):
+                smtp_sec = "STARTTLS"
+            import sqlite3 as _sq
+            conn = _sq.connect(str(db_path))
+            try:
+                existing = conn.execute("SELECT COUNT(*) FROM email_accounts").fetchone()[0]
+                is_default = bool(arguments.get("is_default", False)) or existing == 0
+                if is_default:
+                    conn.execute("UPDATE email_accounts SET is_default = 0")
+                conn.execute(
+                    "INSERT INTO email_accounts "
+                    "(id, owner, name, is_default, enabled, imap_host, imap_port, imap_user, "
+                    "imap_password, imap_starttls, smtp_host, smtp_port, smtp_security, "
+                    "smtp_user, smtp_password, from_address, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (acct_id, "", acct_name, int(is_default), 1,
+                     (arguments.get("imap_host") or "").strip(),
+                     int(arguments.get("imap_port") or 993),
+                     (arguments.get("imap_user") or "").strip(),
+                     imap_pw,
+                     int(bool(arguments.get("imap_starttls", False))),
+                     (arguments.get("smtp_host") or "").strip(),
+                     int(arguments.get("smtp_port") or 587),
+                     smtp_sec,
+                     (arguments.get("smtp_user") or "").strip(),
+                     smtp_pw,
+                     (arguments.get("from_address") or "").strip(),
+                     now, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            _ACCOUNT_CACHE.clear()
+            default_note = " (set as default)" if is_default else ""
+            return [TextContent(type="text", text=f"Account '{acct_name}' added{default_note}. ID: {acct_id}. Use list_emails with account='{acct_name}' to verify connectivity.")]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

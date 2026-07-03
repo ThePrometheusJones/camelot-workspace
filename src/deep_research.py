@@ -613,6 +613,11 @@ class DeepResearcher:
         self._emit(phase="reading", url=url, title=display,
                    total_sources=len(self.urls_fetched))
         try:
+            from src.url_guard import assert_url_allowed, GuardedURLError
+            try:
+                assert_url_allowed(url)
+            except GuardedURLError:
+                return None
             from src.search import fetch_webpage_content
             page = await asyncio.to_thread(fetch_webpage_content, url, 10)
         except Exception as e:
