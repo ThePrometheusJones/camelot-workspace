@@ -86,3 +86,9 @@ When cherry-picking upstream updates, check these files for conflicts.
 | `scripts/wait-for-tailscale.sh` | **NEW** — ExecStartPre: blocks until Tailscale IP is kernel-bindable |
 | `camelot-workspace.service` | Revised: KillMode=control-group, MemoryHigh=3G/MemoryMax=5G, wait-for-tailscale pre-step, fuser retired |
 | `mcp_servers/email_server.py` | Added `add_email_account` MCP tool |
+
+### Redirect Hardening (added 2026-07-03)
+| File | Change |
+|------|--------|
+| `services/search/content.py` | Added `100.64.0.0/10` (CGNAT/tailnet) to `_PRIVATE_NETWORKS`. Upstream's `_get_public_url` already validates every redirect hop — this closes the tailnet gap |
+| `tests/test_ssrf_redirect.py` | **NEW** — 4 tests: tailnet range blocked, 302→localhost blocked, 302→tailnet blocked, public→public allowed |
