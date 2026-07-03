@@ -827,6 +827,238 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     }
 
 
+def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
+    """Return whether an open document should affect this turn.
+
+    The editor can stay open while the user asks unrelated things ("who am I?",
+    "search news"). In those cases injecting document context/tools makes small
+    models overfit to the visible document and call suggest/edit tools. Keep the
+    active document only for explicit document domains or common document-edit
+    continuations.
+    """
+    if active_document is None:
+        return False
+    raw_doc = getattr(active_document, "current_content", "") or ""
+    title_l = (getattr(active_document, "title", "") or "").strip().lower()
+    is_email_doc = (
+        getattr(active_document, "language", None) == "email"
+        or title_l in {"new email", "new mail", "new message"}
+        or ("To:" in raw_doc[:400] and "Subject:" in raw_doc[:400] and "\n---\n" in raw_doc)
+    )
+    if "documents" in (intent.get("domains") or set()):
+        return True
+    text = str(last_user or "").strip().lower()
+    if not text:
+        return False
+    if is_email_doc and re.search(
+        r"\b("
+        r"email|mail|reply|respond|response|draft|compose|send|"
+        r"tell them|tell her|tell him|say|write|make it say|"
+        r"japanese|japan|polite|formal|tone|style"
+        r")\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
+        r".{0,80}\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
+        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary|draft|content)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
+        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary)\b"
+        r".{0,80}\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:add|insert|include|apply|put)\b.+\b(?:to it|to this|there|in it|in this|in the text|in the document)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:make it|make this|expand it|expand this|extend it|extend this|continue it|continue this)\b.*\b(?:longer|shorter|bigger|smaller|more detailed|more concise|expanded|extended)?\b",
+        text,
+    ):
+        return True
+    return bool(re.search(
+        r"\b("
+        r"document|doc|draft|text|poem|story|essay|outline|letter|paragraph|"
+        r"stanza|line|title|heading|section|sentence|word|caps|uppercase|"
+        r"lowercase|rewrite|reword|style|tone|suggest|suggestions|feedback|"
+        r"improve|edit|change|remove|delete|replace|add another|append|"
+        r"original text|in the document|the document|this document"
+        r")\b",
+        text,
+    ))
+
+
+def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
+    facts: List[str] = []
+    seen = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        source = str((metadata or {}).get("source") or "")
+        if not source.startswith("saved memory:"):
+            continue
+        content = str(message.get("content") or "")
+        content = re.sub(r"(?m)^\s*Source:\s*saved memory:[^\n]*\n?", "", content)
+        content = content.replace("Core facts about the user:", "")
+        content = re.sub(
+            r"Memory context\. Do not reference unless the user asks about these topics\.\s*",
+            "",
+            content,
+        )
+        for line in content.splitlines():
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            fact = line[2:].strip()
+            if not fact or fact in seen:
+                continue
+            seen.add(fact)
+            facts.append(fact)
+            if len(facts) >= 12:
+                break
+        if len(facts) >= 12:
+            break
+    if not facts:
+        return None
+    logger.info("[agent-intent] odysseus doc minimal memory facts=%s", len(facts))
+    return {
+        "role": "user",
+        "content": (
+            "Saved user memory facts from Odysseus Brain. These are the same "
+            "user facts available in the normal prompt path. Use them when "
+            "the user asks for personalization, identity, background, "
+            "preferences, or anything about \"me\" or \"my\":\n"
+            + "\n".join(f"- {fact}" for fact in facts)
+        ),
+    }
+
+
+def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream_create: bool = False) -> List[Dict]:
+    """Tiny prompt path for the Odysseus document LoRA.
+
+    This model is trained on document tool behavior, so avoid the normal agent
+    rule stack and send only the task plus the active document when editing.
+    """
+    latest = _extract_last_user_message(messages)
+    if stream_create:
+        system = (
+            "You are Odysseus. Create the requested document by streaming exactly one fenced block:\n"
+            "```document\n"
+            "Title\n"
+            "markdown\n"
+            "Document content\n"
+            "```\n"
+            "Do not use native function-call JSON or <tool_calls> markup. "
+            "Use only the fenced document block above. Do not write anything before the fence. "
+            "Use saved user memory facts when the user asks for something relating to them."
+        )
+    else:
+        system = (
+            "You are Odysseus. Edit or suggest changes to the active document using exactly one fenced tool block when needed.\n"
+            "If the user asks to add, remove, rewrite, transform, change, capitalize, shorten, expand, or otherwise apply a change, use edit_document or update_document, not suggest_document.\n"
+            "Use suggest_document only when the user explicitly asks for suggestions, feedback, or proposed improvements without applying them.\n"
+            "For targeted edits:\n"
+            "```edit_document\n"
+            "<<<FIND>>>\n"
+            "exact text from the active document\n"
+            "<<<REPLACE>>>\n"
+            "replacement text\n"
+            "<<<END>>>\n"
+            "```\n"
+            "For full rewrites only:\n"
+            "```update_document\n"
+            "entire new document content\n"
+            "```\n"
+            "For improvement suggestions:\n"
+            "```suggest_document\n"
+            "<<<FIND>>>\n"
+            "text to improve\n"
+            "<<<SUGGEST>>>\n"
+            "suggested replacement\n"
+            "<<<REASON>>>\n"
+            "why this improves it\n"
+            "<<<END>>>\n"
+            "```\n"
+            "Do not use native function-call JSON or <tool_calls> markup. "
+            "FIND text must be copied exactly from the active document with no labels like content:, title:, or markdown. "
+            "Use only the fenced tool blocks above. Do not write anything before the fenced block. "
+            "After the tool succeeds, Odysseus will answer Done."
+        )
+    out = [{"role": "system", "content": system}]
+    memory_message = _minimal_saved_memory_message(messages)
+    if memory_message:
+        out.append(memory_message)
+    if active_document is not None:
+        content = active_document.current_content or ""
+        out.append({
+            "role": "user",
+            "content": (
+                "Active document:\n"
+                f"Title: {active_document.title}\n"
+                f"Language: {active_document.language or 'text'}\n"
+                "Content:\n"
+                f"{content}"
+            ),
+        })
+    out.append({"role": "user", "content": latest})
+    return out
+
+
+_DOC_MODEL_ARTIFACT_RE = re.compile(
+    r"(?:\|end\|)+\|?assistan(?:t)?\|?"
+    r"|\|assistan(?:t)?\|"
+    r"|<\|im_start\|>\s*assistant"
+    r"|<\|im_end\|>",
+    re.IGNORECASE,
+)
+
+
+def _strip_doc_model_artifacts(text: str) -> str:
+    return _DOC_MODEL_ARTIFACT_RE.sub("", text or "")
+
+
+def _normalize_stream_document_fences(text: str, target_tool: str = "create_document") -> str:
+    """Treat visible ```document/documen blocks as document tool blocks.
+
+    The document LoRA occasionally emits a neutral/truncated `documen` fence.
+    For new documents that maps to create_document. For active-document turns,
+    the same shape is a full replacement of the open document, so map it to
+    update_document and drop the title/language header lines.
+    """
+    text = _strip_doc_model_artifacts(text or "")
+
+    def repl(match: re.Match) -> str:
+        body = match.group(1) or ""
+        if target_tool == "update_document":
+            lines = body.splitlines()
+            if lines and not lines[0].lstrip().startswith("#"):
+                lines = lines[1:]
+            if lines and lines[0].strip().lower() in {
+                "markdown", "md", "text", "txt", "html", "email",
+                "python", "javascript", "typescript", "json", "yaml",
+            }:
+                lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+            body = "\n".join(lines)
+        return f"```{target_tool}\n{body}"
+
+    return re.sub(
+        r"```documen(?:t)?\s*\n([\s\S]*?)(?=\n```|$)",
+        repl,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
     """Build the tool-retrieval query from the last few USER turns, not just
     the latest one.
@@ -1874,6 +2106,9 @@ async def stream_agent_loop(
         sorted(_intent.get("domains") or []),
         _retrieval_query[:200],
     )
+    _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
+    _prompt_active_document = active_document if _active_document_relevant else None
+
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     if plan_mode and mcp_mgr:
         # Allow read-only MCP tools to investigate, block write/unknown ones:
@@ -2025,6 +2260,54 @@ async def stream_agent_loop(
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
+    _intent_domains = set(_intent.get("domains") or set())
+    _ody_doc_finetune_mode = (
+        (model or "").lower().startswith("odysseus-qwen3")
+        and (
+            "documents" in _intent_domains
+            or _active_document_relevant
+            or _prompt_active_document is not None
+        )
+        and "files" not in _intent_domains
+        and not guide_only
+    )
+    _ody_doc_stream_create_mode = _ody_doc_finetune_mode and _prompt_active_document is None
+    if _ody_doc_finetune_mode and _relevant_tools is not None:
+        if _prompt_active_document is not None:
+            _relevant_tools = {
+                "edit_document", "update_document", "suggest_document",
+                "ask_user", "update_plan",
+            }
+        else:
+            _relevant_tools = {"create_document", "ask_user", "update_plan"}
+        logger.info("[agent-intent] odysseus doc finetune tool clamp=%s", sorted(_relevant_tools))
+
+    if (
+        _relevant_tools is not None
+        and _active_document_relevant
+        and "files" not in _intent_domains
+        and not uploaded_files
+        and not workspace
+    ):
+        _doc_irrelevant_file_tools = {
+            "append_file",
+            "bash",
+            "edit_file",
+            "glob",
+            "grep",
+            "ls",
+            "read_file",
+            "replace_file",
+            "run_shell",
+            "write_file",
+        }
+        _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
+        if _removed_doc_file_tools:
+            _relevant_tools.difference_update(_doc_irrelevant_file_tools)
+            logger.info(
+                "[agent-intent] active document turn removed file tools=%s",
+                _removed_doc_file_tools,
+            )
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
