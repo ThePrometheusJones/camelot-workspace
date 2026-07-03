@@ -35,6 +35,59 @@ function _taskBadge(task) {
   return { text: _statusLabel(task.status, task.type), cls: 'cookbook-task-' + task.status };
 }
 
+function _ggufDisplayPartFromPath(path) {
+  const parts = String(path || '').split('/').filter(Boolean);
+  const file = parts[parts.length - 1] || '';
+  const dir = parts.length > 1 ? parts[parts.length - 2] : '';
+  const text = `${dir} ${file}`;
+  const quant = text.match(/\b(?:UD-)?(?:IQ[1-8]_[A-Z0-9]+|Q[2-8]_K_[MLS]|Q[2-8]_[0-9A-Z]+|Q[2-8])\b/i);
+  if (quant) return quant[0].toUpperCase().replace(/^UD-/, '');
+  return file.replace(/\.gguf$/i, '').replace(/-\d{5}-of-\d{5}$/i, '');
+}
+
+function _downloadDisplayName(name, task) {
+  const include = task?.payload?.include || '';
+  if (!include || String(name || '').includes(' · ')) return name;
+  const part = _ggufDisplayPartFromPath(include.replace(/\*/g, ''));
+  return part ? `${name} · ${part}` : name;
+}
+
+function _downloadNameFromPayload(name, payload) {
+  const rawName = String(name || '').trim();
+  const looksLikeLauncher = /^(?:bash|sh|zsh|python|python3|pwsh|powershell|cmd|tmux)$/i.test(rawName);
+  const base = (!rawName || looksLikeLauncher)
+    ? String(payload?.repo_id || payload?.repo || '').split('/').pop()
+    : rawName;
+  const include = payload?.include || '';
+  if (!include || String(base || '').includes(' · ')) return base || rawName || 'download';
+  const part = _ggufDisplayPartFromPath(String(include).replace(/\*/g, ''));
+  return part ? `${base} · ${part}` : (base || rawName || 'download');
+}
+
+function _taskDisplayName(task) {
+  const name = String(task?.name || '').trim();
+  if (task?.type === 'download') return _downloadDisplayName(_downloadNameFromPayload(name, task?.payload), task);
+  if (task?.type !== 'serve') return name;
+  const gguf = task?.payload?._fields?.gguf_file || task?.payload?.gguf_file || '';
+  if (!gguf || name.includes(' · ')) return name;
+  const part = _ggufDisplayPartFromPath(gguf);
+  return part ? `${name} · ${part}` : name;
+}
+
+function _canLaunchDownloadedTask(task) {
+  return task?.type === 'download' && ['done', 'completed'].includes(task.status || '') && !!(task.payload?.repo_id || task.name);
+}
+
+function _downloadServeFields(task) {
+  const include = String(task?.payload?.include || '').trim();
+  if (!include) return null;
+  return {
+    backend: 'llamacpp',
+    _forceBackend: true,
+    _preferredGgufInclude: include,
+  };
+}
+
 // A download task whose tmux output still shows an active per-shard line
 // (e.g. "model-00012-of-00082.safetensors: 56%|") is NOT actually finished —
 // the cookbook just lost track. The clear pill becomes a "reconnect" affordance
@@ -1213,6 +1266,7 @@ async function _retryDownload(name, payload, replaceSessionId = '') {
       const tasks = _loadTasks();
       const task = tasks.find(t => t.sessionId === replaceSessionId);
       if (task) {
+        task.name = _downloadNameFromPayload(name || task.name, _payload);
         task.id = data.session_id;
         task.sessionId = data.session_id;
         task.status = 'running';
@@ -2152,10 +2206,18 @@ export function _renderRunningTab() {
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
       menuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
+        const existing = document.querySelector('.cookbook-task-dropdown');
+        if (existing && existing._anchor === menuBtn) {
+          if (typeof existing._dismiss === 'function') existing._dismiss();
+          else existing.remove();
+          return;
+        }
         document.querySelectorAll('.cookbook-task-dropdown').forEach(d => { if (typeof d._dismiss === 'function') d._dismiss(); else d.remove(); });
 
         const dropdown = document.createElement('div');
         dropdown.className = 'cookbook-task-dropdown';
+        dropdown._anchor = menuBtn;
+        menuBtn.classList.add('cookbook-menu-active');
 
         const items = [];
         // ── Run section ─────────────────────────────────────────────
@@ -2360,7 +2422,7 @@ export function _renderRunningTab() {
         }
 
         const closeHandler = (ev) => {
-          if (!dropdown.contains(ev.target) && ev.target !== menuBtn) {
+          if (!dropdown.contains(ev.target) && ev.target !== menuBtn && !menuBtn.contains(ev.target)) {
             _cleanup();
           }
         };
@@ -2372,6 +2434,7 @@ export function _renderRunningTab() {
         const _cleanup = () => {
           _unreg(); _unreg = () => {};
           dropdown.remove();
+          menuBtn.classList.remove('cookbook-menu-active');
           document.removeEventListener('click', closeHandler);
           window.removeEventListener('scroll', scrollClose, true);
           window.visualViewport?.removeEventListener('scroll', scrollClose);
