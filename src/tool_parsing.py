@@ -55,6 +55,30 @@ _TOOL_CODE_RE = re.compile(
     r"<tool_code>\s*\{([\s\S]*?)\}\s*</tool_code>",
     re.IGNORECASE,
 )
+# _TOOL_CODE_RE's delimiters, split for _iter_delimited's forward-only scan.
+_TOOL_CODE_OPEN_RE = re.compile(r"<tool_code>\s*\{", re.IGNORECASE)
+_TOOL_CODE_CLOSE_RE = re.compile(r"\}\s*</tool_code>", re.IGNORECASE)
+
+# Pattern 4b: Gemma-style <|tool_call|> call:tool_name{args} <tool_call|>
+_GEMMA_TOOL_CALL_RE = re.compile(
+    r"<\|?tool_call\|?>\s*call:([\w\d_-]+)\s*(\{[\s\S]*?\})\s*<\|?tool_call\|?>",
+    re.IGNORECASE,
+)
+
+# Pattern 4c: Open-function wrapper emitted by some local MLX/Exo models.
+# Example:
+#   <function_model>
+#   <function_call>web_search</function_call>
+#   <parameters>{"query":"Sweden news today"}</parameters>
+#   </function_model>
+_FUNCTION_MODEL_OPEN_RE = re.compile(r"<function_model>\s*", re.IGNORECASE)
+_FUNCTION_MODEL_CLOSE_RE = re.compile(r"</function_model>", re.IGNORECASE)
+_FUNCTION_MODEL_NAME_RE = re.compile(
+    r"<function_call>\s*([A-Za-z_][\w-]*)\s*</function_call>",
+    re.IGNORECASE,
+)
+_FUNCTION_MODEL_PARAMS_OPEN_RE = re.compile(r"<parameters>\s*", re.IGNORECASE)
+_FUNCTION_MODEL_PARAMS_CLOSE_RE = re.compile(r"</parameters>", re.IGNORECASE)
 
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
@@ -562,6 +586,166 @@ def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
         return ToolBlock(tool_name, content.strip())
     return None
 
+def _parse_gemma_tool_call(tool_name: str, body: str) -> Optional[ToolBlock]:
+    """Parse a Gemma-style call:tool_name{...} block into a ToolBlock."""
+    tool_name = tool_name.strip().lower().replace("-", "_")
+    body = body.strip()
+    if not body:
+        return None
+
+    # Replace custom Gemma string delimiters with standard quotes
+    body = body.replace('<|"|>', '"').replace('<|"', '"').replace('"|>', '"')
+
+    # Try standard JSON parsing
+    params = {}
+    try:
+        params = json.loads(body)
+        if not isinstance(params, dict):
+            params = {}
+    except json.JSONDecodeError:
+        # Try unquoted keys repair: e.g. {query: "..."} -> {"query": "..."}
+        try:
+            repaired = re.sub(r'([{,]\s*)(\w+)\s*:', r'\1"\2":', body)
+            params = json.loads(repaired)
+            if not isinstance(params, dict):
+                params = {}
+        except Exception:
+            # Simple regex key-value extraction fallback
+            params = {}
+            for m in re.finditer(r'(\w+)\s*:\s*["\']?(.*?)["\']?(?=\s*,\s*\w+\s*:|\s*\})', body):
+                k = m.group(1)
+                v = m.group(2).strip()
+                params[k] = v
+
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(tool_name, json.dumps(params))
+
+
+def _parse_function_model_call(body: str) -> Optional[ToolBlock]:
+    """Parse <function_model><function_call>tool</...><parameters>...</...>."""
+    name_match = _FUNCTION_MODEL_NAME_RE.search(body or "")
+    if not name_match:
+        return None
+    tool_name = name_match.group(1).strip().lower().replace("-", "_")
+    params = "{}"
+    for _ms, inner_start, inner_end, _me in _iter_delimited(
+        body,
+        _FUNCTION_MODEL_PARAMS_OPEN_RE,
+        _FUNCTION_MODEL_PARAMS_CLOSE_RE,
+    ):
+        params = body[inner_start:inner_end].strip() or "{}"
+        break
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(tool_name, params)
+
+
+def _iter_delimited(text, open_re, close_re):
+    """Yield ``(match_start, inner_start, inner_end, match_end)`` for each
+    non-overlapping ``open_re ... close_re`` pair, scanning strictly forward.
+
+    For the lazy, non-nesting delimiters here this is equivalent to
+    ``re.finditer`` of ``open_re([\\s\\S]*?)close_re`` (each opener pairs with
+    the first closer after it; the next scan resumes past that closer), but it
+    runs in O(n): the moment an opener has no reachable closer, no later opener
+    can have one either, so we stop. ``re.finditer`` instead retries from every
+    opener and rescans to end-of-string each time -> O(n^2) on attacker-
+    controlled "many openers, no closer" model output (CodeQL py/polynomial-redos).
+
+    A whole-string "is the closer present?" guard is not enough: a stale closer
+    placed before an opener flood, or a closer with no matching inner delimiter
+    (e.g. `[/TOOL_CALL]` but no `}`), keeps the guard true while every opener
+    still rescans. Pairing each opener only with a closer *after* it closes both
+    holes.
+    """
+    pos = 0
+    while True:
+        om = open_re.search(text, pos)
+        if om is None:
+            return
+        cm = close_re.search(text, om.end())
+        if cm is None:
+            return
+        yield om.start(), om.end(), cm.start(), cm.end()
+        pos = cm.end()
+
+
+def _strip_delimited(text: str, open_re, close_re) -> str:
+    """Remove every ``open_re ... close_re`` span (forward-only; see
+    _iter_delimited). Equivalent to ``open_re([\\s\\S]*?)close_re`` ``re.sub('')``
+    for these delimiters, without the O(n^2) rescan on unclosed openers."""
+    spans = list(_iter_delimited(text, open_re, close_re))
+    if not spans:
+        return text
+    out = []
+    last = 0
+    for match_start, _inner_start, _inner_end, match_end in spans:
+        out.append(text[last:match_start])
+        last = match_end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _iter_named_blocks(text, open_re, close_re):
+    """Forward-only equivalent of ``open_re([\\s\\S]*?)close_re`` finditer where
+    open_re captures a name in group 1: yield ``(name, body)``, pairing each
+    opener with the first ``close_re`` after it. O(n) once no closer is reachable
+    from an opener, no later opener has one either (see _iter_delimited), so
+    untrusted opener floods can't drive the lazy O(n^2) rescan."""
+    pos = 0
+    while True:
+        om = open_re.search(text, pos)
+        if om is None:
+            return
+        cm = close_re.search(text, om.end())
+        if cm is None:
+            return
+        yield om.group(1), text[om.end():cm.start()]
+        pos = cm.end()
+
+
+def _iter_xml_invoke(text):
+    """Forward-only ``<invoke name="..">...</invoke>`` scan (see _iter_named_blocks)."""
+    return _iter_named_blocks(text, _XML_INVOKE_OPEN_RE, _XML_INVOKE_CLOSE_RE)
+
+
+def _iter_backref_blocks(text, open_re, close_any_re, ci=False):
+    """Forward-only equivalent of an ``<tag>([\\s\\S]*?)</tag>`` backreference
+    finditer (same-name open/close): yield ``(name, body)``, pairing each opener
+    with the nearest following matching closer and skipping an opener whose
+    closer is unreachable.
+
+    Every closer is indexed by tag name in one linear pass, then each opener
+    binary-searches its own name's closer positions. A flood of distinct unclosed
+    tag names therefore stays O(n log n) rather than the lazy backref's O(n^2)
+    suffix rescan (CodeQL py/polynomial-redos); per-name memoization alone left
+    that distinct-name case quadratic. ``close_any_re`` matches ANY closer and
+    captures its tag name in group 1; ``ci`` lowercases names for matching, since
+    the original backref closer is case-insensitive under re.IGNORECASE."""
+    norm = (lambda s: s.lower()) if ci else (lambda s: s)
+    closer_starts = {}
+    closer_ends = {}
+    for cm in close_any_re.finditer(text):
+        k = norm(cm.group(1))
+        closer_starts.setdefault(k, []).append(cm.start())
+        closer_ends.setdefault(k, []).append(cm.end())
+    om = open_re.search(text)
+    while om is not None:
+        name = om.group(1)
+        k = norm(name)
+        resume = om.end()
+        starts = closer_starts.get(k)
+        if starts:
+            i = bisect.bisect_left(starts, om.end())
+            if i < len(starts):
+                yield name, text[om.end():starts[i]]
+                resume = closer_ends[k][i]
+        om = open_re.search(text, resume)
+
+
+def _iter_xml_direct(text):
+    """Forward-only equivalent of ``_XML_DIRECT_TOOL_RE.finditer`` (see
+    _iter_backref_blocks)."""
+    return _iter_backref_blocks(text, _XML_DIRECT_OPEN_RE, _XML_DIRECT_CLOSE_ANY_RE, ci=True)
 
 def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
@@ -647,6 +831,15 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
+    # Pattern 4c: <function_model> wrapper from local MLX/Exo models.
+    if not blocks:
+        for _ms, inner_start, inner_end, _me in _iter_delimited(
+            text, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE
+        ):
+            block = _parse_function_model_call(text[inner_start:inner_end])
+            if block:
+                blocks.append(block)
+
     # Pattern 6: local text-model web_search call leaked as prose + bare JSON.
     if not blocks and not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(text)
@@ -680,6 +873,8 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _TOOL_CALL_RE.sub('', cleaned)
     cleaned = _XML_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _TOOL_CODE_RE.sub('', cleaned)
+    cleaned = _GEMMA_TOOL_CALL_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE)
     if not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(cleaned)
         if raw_web_json:
