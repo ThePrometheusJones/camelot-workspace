@@ -8,8 +8,14 @@ module-level, time-injectable function.
 
 from datetime import datetime, timezone
 
+import pytest
 import services.search.ranking as live_ranking
 from services.search.ranking import recency_score, _utcnow_naive, rank_search_results
+
+
+@pytest.fixture(autouse=True)
+def _force_keyword_fallback(monkeypatch):
+    monkeypatch.setattr(live_ranking, "_get_embedder", lambda: None)
 
 
 def test_fresh_result_scores_one():

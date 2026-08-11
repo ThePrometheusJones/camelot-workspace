@@ -22,6 +22,11 @@ MODULES = [services_ranking, src_ranking]
 MODULE_IDS = ["services", "src"]
 
 
+@pytest.fixture(autouse=True)
+def _force_keyword_fallback(monkeypatch):
+    monkeypatch.setattr(services_ranking, "_get_embedder", lambda: None)
+
+
 @pytest.mark.parametrize("ranking", MODULES, ids=MODULE_IDS)
 def test_sports_regex_ignores_substring_false_positives(ranking):
     for word in ("transport", "passport", "sportswear", "transportation"):

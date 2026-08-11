@@ -24,6 +24,11 @@ RANK_MODULES = [services_ranking, src_ranking]
 RANK_IDS = ["services", "src"]
 
 
+@pytest.fixture(autouse=True)
+def _force_keyword_fallback(monkeypatch):
+    monkeypatch.setattr(services_ranking, "_get_embedder", lambda: None)
+
+
 # --- _has_word helper (defined in the services module) ---------------------
 
 def test_has_word_rejects_substring_false_positives():

@@ -1,4 +1,12 @@
+import services.search.ranking as ranking_mod
 from services.search.ranking import rank_search_results
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _force_keyword_fallback(monkeypatch):
+    """These tests validate keyword ranking logic; bypass semantic path."""
+    monkeypatch.setattr(ranking_mod, "_get_embedder", lambda: None)
 
 
 def test_news_queries_prefer_news_sources_over_sports_and_social_results():

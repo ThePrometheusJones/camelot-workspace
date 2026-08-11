@@ -1,12 +1,33 @@
 """Search result ranking based on relevance, source quality, and recency."""
 
 import re
+import time
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 from urllib.parse import urlparse
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
+
+# --- Embedding client (lazy singleton) ------------------------------------
+_embed_client = None
+_embed_attempted = False
+
+
+def _get_embedder():
+    """Lazy-load the shared embedding client. Returns None on failure."""
+    global _embed_client, _embed_attempted
+    if _embed_attempted:
+        return _embed_client
+    _embed_attempted = True
+    try:
+        from src.embeddings import get_embedding_client
+        _embed_client = get_embedding_client()
+    except Exception as e:
+        logger.warning("Embedding client unavailable for reranking: %s", e)
+    return _embed_client
 
 _AGE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
 
@@ -89,8 +110,67 @@ def _has_word(text: str, term: str) -> bool:
     return re.search(rf"\b{re.escape(term)}\b", text) is not None
 
 
+def _domain_prior(url: str) -> float:
+    """Simple domain authority prior."""
+    netloc = _domain(url)
+    if not netloc:
+        return 0.0
+    if netloc in _LOW_VALUE_NEWS_DOMAINS:
+        return 0.1
+    if netloc.endswith(".edu") or netloc.endswith(".gov"):
+        return 1.0
+    if netloc.endswith(".org"):
+        return 0.7
+    return 0.4
+
+
+def _semantic_rank(query: str, results: List[dict], embedder) -> List[dict]:
+    """Rank using cosine similarity as dominant signal."""
+    texts = [f"{r.get('title', '')}. {r.get('snippet', '')}" for r in results]
+    t0 = time.monotonic()
+    all_texts = [query] + texts
+    vecs = embedder.encode(all_texts, normalize_embeddings=True)
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    if elapsed_ms > 100:
+        logger.warning("Embedding rerank took %.0fms for %d results", elapsed_ms, len(results))
+
+    query_vec = vecs[0:1]  # (1, dim)
+    result_vecs = vecs[1:]  # (N, dim)
+    # Cosine similarity (vectors are normalized, so dot product = cosine)
+    cosine_scores = (result_vecs @ query_vec.T).flatten()
+
+    ranked = []
+    for i, result in enumerate(results):
+        score = (
+            2.5 * float(cosine_scores[i])
+            + 0.5 * recency_score(result.get("age"))
+            + 0.3 * _domain_prior(result.get("url", ""))
+        )
+        ranked.append((score, result))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in ranked]
+
+
 def rank_search_results(query: str, results: List[dict]) -> List[dict]:
-    """Rank search results by title relevance, snippet quality, domain authority, and recency."""
+    """Rank search results by semantic similarity, domain authority, and recency.
+
+    Falls back to keyword scoring if embedding client is unavailable."""
+    if not results:
+        return results
+
+    embedder = _get_embedder()
+    if embedder is not None:
+        try:
+            return _semantic_rank(query, results, embedder)
+        except Exception as e:
+            logger.warning("Semantic rerank failed, falling back to keyword scoring: %s", e)
+
+    return _keyword_rank(query, results)
+
+
+def _keyword_rank(query: str, results: List[dict]) -> List[dict]:
+    """Legacy keyword-based ranking (fallback)."""
     query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query)]
     query_lc = query.lower()
     is_news_query = any(term in _NEWS_HINTS for term in query_terms)
@@ -137,8 +217,6 @@ def rank_search_results(query: str, results: List[dict]) -> List[dict]:
             adjustment -= 0.8
         if not is_sports_query and (_SPORTS_HINT_RE.search(text) or _SPORTS_HINT_RE.search(netloc)):
             adjustment -= 1.5
-        # A country/news query should not rank a page whose title/snippet barely
-        # mentions the country above actual news pages for that country.
         subject_terms = [t for t in query_terms if t not in _NEWS_HINTS]
         if subject_terms and not any(_has_word(text, t) or _has_word(netloc, t) for t in subject_terms):
             adjustment -= 1.0
