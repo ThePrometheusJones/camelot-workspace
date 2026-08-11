@@ -59,11 +59,22 @@ _SENSITIVE_BASENAMES: set[str] = {
     ".zshrc", ".zprofile", ".zshenv",
     ".profile", ".tcshrc", ".cshrc",
     ".env", ".netrc",
+    ".hermes",  # ponytail: Guinevere identity, memories, vault — crown jewels
 }
 
 _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa",
     "known_hosts",
+    "auth.json",        # Bailey credentials (bcrypt hashes, 2FA secrets)
+    "credentials",      # generic credential files
+    "credentials.json",
+    ".env.guinevere",   # Guinevere secrets (email passwords, API keys)
+)
+
+# Glob-style suffix patterns — matched against filename extensions.
+# Checked separately from exact basenames because these are wildcards.
+_SENSITIVE_SUFFIXES: tuple[str, ...] = (
+    ".key", ".pem", ".p12", ".pfx", ".jks", ".keystore",
 )
 
 # Case-folded views used for matching. On a case-insensitive filesystem
@@ -94,7 +105,11 @@ def _is_sensitive_path(resolved: str) -> bool:
             return True
 
     # Check filename against known sensitive files.
-    return filename in _SENSITIVE_FILE_PATTERNS_CF
+    if filename in _SENSITIVE_FILE_PATTERNS_CF:
+        return True
+
+    # Check file extension against sensitive suffixes (.key, .pem, etc.)
+    return any(filename.endswith(s) for s in _SENSITIVE_SUFFIXES)
 
 
 def _tool_path_roots() -> list[str]:
