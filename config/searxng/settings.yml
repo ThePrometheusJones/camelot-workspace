@@ -2,8 +2,33 @@ use_default_settings: true
 
 server:
   secret_key: "__SEARXNG_SECRET__"
+  limiter: false  # ponytail: single-user private instance, no rate limiting needed
 
 search:
   formats:
     - html
     - json
+
+engines:
+  # Reliable from this host (tested 2026-08-11)
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  # Blocked/CAPTCHA'd from residential IP — disable to avoid timeout waste
+  - name: google
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: brave
+    disabled: true
+  - name: mojeek
+    disabled: true
+  - name: presearch
+    disabled: true

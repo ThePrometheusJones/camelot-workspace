@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 
 from src.constants import SEARXNG_INSTANCE
 from .analytics import RateLimitError, error_logger
-from .query import build_enhanced_query
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +130,7 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 # routinely rate-limited / CAPTCHA-blocked on this instance and return nothing.
 # Pin engines that actually respond so non-news queries get results without any
 # third-party API fallback. Override via SEARXNG_GENERAL_ENGINES.
-_GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,mojeek,presearch")
+_GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,duckduckgo,yahoo")
 
 
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
@@ -292,7 +291,6 @@ def brave_search(query: str, count: Optional[int] = None, time_filter: Optional[
 
 def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None, search_config: dict = None) -> List[dict]:
     """Core Brave API call. Returns a list of result dicts or an empty list on failure."""
-    enhanced_query = build_enhanced_query(query, time_filter)
     config = search_config or {}
 
     brave_api_key = config.get("brave_api_key")
@@ -305,7 +303,7 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
 
     headers = {"X-Subscription-Token": brave_api_key, "Accept": "application/json"}
     params = {
-        "q": enhanced_query,
+        "q": query,
         "count": count,
         "safesearch": _safesearch_for("brave"),
     }
@@ -314,7 +312,7 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
         if time_filter in time_map:
             params["freshness"] = time_map[time_filter]
 
-    logger.info(f"Executing Brave search with query: {enhanced_query}")
+    logger.info(f"Executing Brave search with query: {query}")
     try:
         response = httpx.get(
             "https://api.search.brave.com/res/v1/web/search",
