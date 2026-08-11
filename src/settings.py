@@ -83,6 +83,8 @@ DEFAULT_SETTINGS = {
     # backend itself decides, so operators stay in control of self-hosted /
     # niche search instances.
     "search_safesearch": "strict",
+    "search_max_pages": 5,
+    "search_max_content_chars": 8000,
     "brave_api_key": "",
     "google_pse_key": "",
     "google_pse_cx": "",

@@ -33,13 +33,7 @@ from .providers import (
     _get_provider_key,
     _get_result_count,
 )
-from .content import (
-    fetch_webpage_content,
-    extract_key_points,
-    get_tldr,
-    extract_quotes,
-    extract_statistics,
-)
+from .content import fetch_webpage_content
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +198,7 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(cache_data, f)
             search_cache_index[cache_key] = datetime.now()
-            cleanup_cache(SEARCH_CACHE_DIR, search_cache_index, timedelta(hours=1))
+            cleanup_cache(SEARCH_CACHE_DIR, search_cache_index, timedelta(hours=24))
         except Exception as e:
             logger.warning(f"Failed to write search cache for {query}: {e}")
 
@@ -249,7 +243,7 @@ def invalidate_search_cache(query: Optional[str] = None) -> None:
 # ----------------------------------------------------------------------
 def comprehensive_web_search(
     query: str,
-    max_pages: int = 3,
+    max_pages: int = None,
     max_workers: int = 4,
     time_filter: str = None,
     domain_whitelist: Optional[Set[str]] = None,
@@ -265,6 +259,10 @@ def comprehensive_web_search(
         logger.info(f"Applying time filter: {time_filter}")
 
     settings = _get_search_settings()
+
+    # Configurable limits via settings (ponytail: was hardcoded 3 pages / 3000 chars)
+    if max_pages is None:
+        max_pages = settings.get("search_max_pages", 5)
     search_provider = settings.get("search_provider", "searxng")
     result_count = _get_result_count()
 
@@ -420,9 +418,8 @@ def comprehensive_web_search(
 
         # Emit blocks in source order, numbered with the same [i] as the
         # sources list, so [CONTENT 2] really is content from source [2].
-        # Before this, blocks were numbered 1..N in fetch COMPLETION order,
-        # which matched neither the sources list nor each other run to run.
         fetched_content.sort(key=lambda c: c.get("source_index") or len(search_results) + 1)
+        max_chars = settings.get("search_max_content_chars", 8000)
         for content in fetched_content:
             _idx = content.get("source_index")
             _label = f"[CONTENT {_idx}]" if _idx else "[CONTENT]"
@@ -430,34 +427,10 @@ def comprehensive_web_search(
             output_parts.append(f"Title: {content['title']}")
             output_parts.append("-" * 30)
 
-            text = content["content"][:3000]
-            if len(content["content"]) > 3000:
+            text = content["content"][:max_chars]
+            if len(content["content"]) > max_chars:
                 text += "... [truncated]"
             output_parts.append(text)
-
-            key_points = extract_key_points(content["content"])
-            if key_points:
-                output_parts.append("\nKey Points:")
-                for pt in key_points[:5]:
-                    output_parts.append(f"- {pt}")
-
-            tldr = get_tldr(content["content"])
-            if tldr:
-                output_parts.append("\nTL;DR:")
-                output_parts.append(tldr)
-
-            quotes = extract_quotes(content["content"])
-            if quotes:
-                output_parts.append("\nImportant Quotes:")
-                for q in quotes[:3]:
-                    output_parts.append(f"\u201c{q}\u201d")
-
-            stats = extract_statistics(content["content"])
-            if stats:
-                output_parts.append("\nData / Statistics:")
-                for s in stats[:5]:
-                    output_parts.append(f"- {s}")
-
             output_parts.append("")
 
     output_parts.append("=" * 70)
