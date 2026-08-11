@@ -61,6 +61,21 @@ def test_webhook_url_ssrf_mitigation():
     assert validate_webhook_url(public_url) == public_url
 
 
+def test_webhook_url_rejects_cgnat_tailscale():
+    """CGNAT range (100.64.0.0/10) covers all Tailscale IPs.
+    A webhook must not be deliverable to a tailnet peer."""
+    cgnat_urls = [
+        "http://100.64.0.1/",
+        "http://100.100.100.100/",
+        "http://100.118.94.13/",  # camelot's own Tailscale IP
+        "http://100.127.255.254/",
+    ]
+    for url in cgnat_urls:
+        with pytest.raises(ValueError) as exc:
+            validate_webhook_url(url)
+        assert "private/internal addresses" in str(exc.value), f"CGNAT URL not blocked: {url}"
+
+
 @pytest.mark.asyncio
 async def test_webhook_delivery_uses_naive_utc_timestamps(monkeypatch):
     import src.webhook_manager as wm
