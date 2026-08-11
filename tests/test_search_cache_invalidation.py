@@ -12,10 +12,12 @@ and silently failed to invalidate anything — a contract violation of its own
 docstring ("invalidate ... just the given query"). The fix derives the count
 from ``_get_result_count()`` so invalidation matches the stored default entry.
 """
+import json
 import pytest
+from datetime import datetime, timedelta
 
 from src.search import core
-from src.search.cache import generate_cache_key
+from src.search.cache import generate_cache_key, cleanup_cache
 
 
 def test_invalidate_uses_configured_count_not_hardcoded_10(tmp_path, monkeypatch):
@@ -43,3 +45,65 @@ def test_invalidate_uses_configured_count_not_hardcoded_10(tmp_path, monkeypatch
         assert write_key not in core.search_cache_index
     finally:
         core.search_cache_index.pop(write_key, None)
+
+
+def test_cleanup_honors_per_entry_expiry(tmp_path):
+    """A reference-query cache entry (24h expiry) must survive a cleanup
+    that would have killed it under the old blanket 1-hour max_age."""
+    index = {}
+    now = datetime.now()
+
+    # Entry with 24h expiry, written 2 hours ago (old behavior would kill it)
+    key_alive = "alive_key"
+    cache_file_alive = tmp_path / f"{key_alive}.cache"
+    cache_file_alive.write_text(json.dumps({
+        "timestamp": (now - timedelta(hours=2)).isoformat(),
+        "expiry": (now + timedelta(hours=22)).isoformat(),
+        "data": [],
+    }), encoding="utf-8")
+    index[key_alive] = now - timedelta(hours=2)
+
+    # Entry with expired expiry
+    key_dead = "dead_key"
+    cache_file_dead = tmp_path / f"{key_dead}.cache"
+    cache_file_dead.write_text(json.dumps({
+        "timestamp": (now - timedelta(hours=25)).isoformat(),
+        "expiry": (now - timedelta(hours=1)).isoformat(),
+        "data": [],
+    }), encoding="utf-8")
+    index[key_dead] = now - timedelta(hours=25)
+
+    cleanup_cache(tmp_path, index, timedelta(hours=24))
+
+    assert cache_file_alive.exists(), "Live 24h entry was wrongly reaped"
+    assert key_alive in index
+    assert not cache_file_dead.exists(), "Expired entry was not reaped"
+    assert key_dead not in index
+
+
+def test_cleanup_reaps_orphaned_expired_files(tmp_path):
+    """Files on disk but not in the index (orphans from restart) should be
+    reaped if their embedded expiry has passed."""
+    index = {}
+    now = datetime.now()
+
+    orphan = tmp_path / "orphan_abc.cache"
+    orphan.write_text(json.dumps({
+        "timestamp": (now - timedelta(hours=3)).isoformat(),
+        "expiry": (now - timedelta(hours=1)).isoformat(),
+        "data": [],
+    }), encoding="utf-8")
+
+    # Orphan with future expiry — should be re-indexed, not deleted
+    live_orphan = tmp_path / "live_orphan.cache"
+    live_orphan.write_text(json.dumps({
+        "timestamp": now.isoformat(),
+        "expiry": (now + timedelta(hours=10)).isoformat(),
+        "data": [],
+    }), encoding="utf-8")
+
+    cleanup_cache(tmp_path, index, timedelta(hours=24))
+
+    assert not orphan.exists(), "Expired orphan was not reaped"
+    assert live_orphan.exists(), "Live orphan was wrongly reaped"
+    assert "live_orphan" in index, "Live orphan was not re-indexed"
