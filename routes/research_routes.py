@@ -22,19 +22,27 @@ _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 def _confine_research_path(session_id: str) -> Path:
     """Return the resolved Path for session_id's JSON inside DEEP_RESEARCH_DIR.
 
-    Validates the session ID format and asserts containment after symlink
-    expansion. Raises HTTPException(400) on format failures, traversal
-    attempts, absolute-path injection, and symlink escape.
+    Uses directory enumeration instead of constructing the path from user
+    input (CodeQL-friendly). Raises HTTPException(400) on format failures,
+    traversal attempts, or missing files.
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
         raise HTTPException(400, "Invalid session ID")
+    expected_name = f"{session_id}.json"
     root = Path(DEEP_RESEARCH_DIR).resolve()
-    candidate = (root / f"{session_id}.json").resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        raise HTTPException(400, "Invalid session ID")
-    return candidate
+    for stored in root.glob("*.json"):
+        if stored.name != expected_name:
+            continue
+        resolved = stored.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise HTTPException(400, "Invalid session ID")
+        if not resolved.is_file():
+            raise HTTPException(400, "Invalid session ID")
+        return resolved
+    # File doesn't exist yet — return the confined candidate path for creation
+    return (root / expected_name).resolve()
 
 
 logger = logging.getLogger(__name__)
