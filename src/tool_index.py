@@ -290,7 +290,7 @@ class ToolIndex:
         self._mcp_generation = gen
         logger.info(f"Indexed {len(docs)} MCP tools")
 
-    def retrieve(self, query: str, k: int = 8) -> List[str]:
+    def retrieve(self, query: str, k: int = 8, min_score: float = 0.20) -> List[str]:
         """Retrieve the top-K most relevant tool names for a query."""
         rows = []
         lane_priority = {LANE_CUSTOM: 0, LANE_FASTEMBED: 1}
@@ -321,6 +321,9 @@ class ToolIndex:
             except Exception as e:
                 logger.warning("Tool retrieval failed in %s lane: %s", lane.name, e)
         rows.sort(key=lambda row: (-row["score"], lane_priority.get(row["embedding_lane"], 99)))
+        # ponytail: score floor — drop noise matches so document Q&A doesn't ship irrelevant tool schemas.
+        # Real matches score 0.20+, noise scores 0.05-0.15. ALWAYS_AVAILABLE still ships regardless.
+        rows = [r for r in rows if r["score"] >= min_score]
         return [row["tool_name"] for row in dedupe_results(rows, id_key="tool_name", limit=k)]
 
     # Structural recurring-schedule intent. Typo-resilient (matches "every dya"
