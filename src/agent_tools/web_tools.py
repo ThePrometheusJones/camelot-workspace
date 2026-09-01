@@ -1,8 +1,13 @@
 import asyncio
 import json
+import logging
 from typing import Dict, Any
 
+import httpx
+
 from src.constants import MAX_OUTPUT_CHARS
+
+logger = logging.getLogger(__name__)
 
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -54,9 +59,11 @@ class WebSearchTool:
             output += "\n\n<!-- SOURCES:" + json.dumps(sources) + " -->"
         return {"output": output, "exit_code": 0}
 
+# ponytail: all web_fetch goes through Hardwater Ranger stealth browser on :7200
+_BROWSER_API = "http://localhost:7200"
+
 class WebFetchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.search.content import fetch_webpage_content
         raw = content.strip()
         url = ""
         if raw.startswith("{"):
@@ -81,24 +88,42 @@ class WebFetchTool:
             assert_url_allowed(url)
         except GuardedURLError as e:
             return {"error": f"web_fetch: URL blocked by policy: {e}", "exit_code": 1}
-        loop = asyncio.get_running_loop()
+
         try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: fetch_webpage_content(url, timeout=10)),
-                timeout=30,
-            )
-        except asyncio.TimeoutError:
+            async with httpx.AsyncClient(timeout=45) as client:
+                resp = await client.post(
+                    f"{_BROWSER_API}/fetch",
+                    json={"url": url, "wait_ms": 3000, "timeout": 30000},
+                )
+                if resp.status_code != 200:
+                    return {"error": f"web_fetch: stealth browser returned {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
+                data = resp.json()
+        except httpx.TimeoutException:
             return {"error": f"web_fetch: timed out fetching {url}", "exit_code": 1}
+        except httpx.ConnectError:
+            # BrowserAPI not running — fall back to plain HTTP
+            from src.search.content import fetch_webpage_content
+            loop = asyncio.get_running_loop()
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: fetch_webpage_content(url, timeout=10)),
+                    timeout=30,
+                )
+            except Exception as e:
+                return {"error": f"web_fetch: {url}: {e}", "exit_code": 1}
+            text = (result.get("content") or "").strip()
+            title = result.get("title") or ""
+            if not text:
+                err = result.get("error", "no readable content")
+                return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
+            data = {"text": text, "title": title}
         except Exception as e:
             return {"error": f"web_fetch: {url}: {e}", "exit_code": 1}
-        err = result.get("error")
-        text = (result.get("content") or "").strip()
-        title = result.get("title") or ""
 
+        text = (data.get("text") or "").strip()
+        title = data.get("title") or ""
         if not text:
-            if err:
-                return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
-            return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
+            return {"error": f"web_fetch: {url}: no readable text content", "exit_code": 1}
 
         header = (f"# {title}\n" if title else "") + f"Source: {url}\n\n"
         output = header + text

@@ -9172,6 +9172,34 @@ body.hide-thinking .thinking-section { display: none !important; }
   letter-spacing: 0.5px;
 }
 
+/* ---- Guinevere thinking crown ---- */
+.gwen-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  animation: gwen-fade-in 0.3s ease-out;
+}
+.gwen-crown {
+  font-size: 22px;
+  animation: gwen-spin-crown 1.8s ease-in-out infinite;
+  filter: drop-shadow(0 0 6px rgba(201, 162, 39, 0.6));
+}
+.gwen-think-text {
+  font-size: 13px;
+  color: var(--fg-dim, #999);
+  font-style: italic;
+  letter-spacing: 0.3px;
+}
+@keyframes gwen-spin-crown {
+  0%   { transform: rotateY(0deg); }
+  50%  { transform: rotateY(180deg); }
+  100% { transform: rotateY(360deg); }
+}
+@keyframes gwen-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .agent-tool-output[open] {
   background: color-mix(in srgb, var(--red) 6%, transparent);
 }

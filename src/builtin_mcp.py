@@ -80,7 +80,8 @@ _BUILTIN_NPX_SERVERS = {
     "builtin_browser": {
         "name": "Built-in: Browser",
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision"],
+        "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision",
+                 "--executable-path", "/usr/bin/chromium-browser"],
     },
 }
 

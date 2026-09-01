@@ -1101,32 +1101,47 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _lastToolName = '';
       const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
       const _toolLabels = {
-        'web_search': 'Searching',
-        'bash': 'Running',
-        'python': 'Running',
-        'create_document': 'Writing',
-        'update_document': 'Writing',
-        'read_document': 'Reading',
-        'edit_file': 'Editing',
-        'read_file': 'Reading',
-        'write_file': 'Writing',
-        'list_files': 'Browsing',
-        'image_gen': 'Generating',
-        'generate_image': 'Generating',
-        'manage_memory': 'Remembering',
+        'web_search': 'Scouring the realm',
+        'web_fetch': 'Fetching scrolls',
+        'bash': 'Commanding',
+        'python': 'Conjuring',
+        'create_document': 'Inscribing',
+        'update_document': 'Amending the scroll',
+        'read_document': 'Studying',
+        'edit_file': 'Revising',
+        'read_file': 'Perusing',
+        'write_file': 'Scribing',
+        'list_files': 'Surveying',
+        'image_gen': 'Envisioning',
+        'generate_image': 'Envisioning',
+        'manage_memory': 'Committing to memory',
         'save_memory': 'Remembering',
         'search_memory': 'Recalling',
         'manage_session': 'Organizing',
-        'deep_research': 'Researching',
-        'list_models': 'Browsing',
+        'deep_research': 'Deep in research',
+        'trigger_research': 'Investigating',
+        'list_models': 'Inspecting the arsenal',
         'ui_control': 'Adjusting',
+        'send_email': 'Dispatching a raven',
+        'reply_to_email': 'Penning a reply',
+        'list_emails': 'Checking the post',
+        'read_email': 'Reading correspondence',
+        'manage_calendar': 'Consulting the calendar',
+        'manage_notes': 'Jotting notes',
+        'manage_tasks': 'Marshalling tasks',
+        'resolve_contact': 'Looking up a contact',
       };
       const _toolIcons = {
         'web_search': _searchIcon,
       };
+      // ponytail: rotating pool of idle labels — picks one at random each time
+      const _idleLabels = [
+        'Pondering', 'Kanoodling', 'Guinifying', 'Kombobulating',
+        'Deliberating', 'Scheming', 'Ruminating', 'Musing',
+      ];
       function _thinkingLabel() {
         if (!_lastToolName) {
-          return 'Thinking';
+          return _idleLabels[Math.floor(Math.random() * _idleLabels.length)];
         }
         // Check exact match first, then prefix match
         const lower = _lastToolName.toLowerCase();
@@ -1134,7 +1149,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         for (const [key, label] of Object.entries(_toolLabels)) {
           if (lower.includes(key) || key.includes(lower)) return label;
         }
-        return 'Thinking';
+        return _idleLabels[Math.floor(Math.random() * _idleLabels.length)];
       }
 
       function _showThinkingSpinner(label) {
@@ -1143,10 +1158,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         _thinkMsg.className = 'msg msg-ai agent-thinking-dots';
         const _thinkBody = document.createElement('div');
         _thinkBody.className = 'body';
-        const _ts = spinnerModule.create(label || 'Thinking', 'right', 'wave');
-        _thinkBody.appendChild(_ts.createElement());
-        _ts.start(120);
-        _thinkMsg._spinner = _ts;
+        // Spinning crown + label (no canvas spinner needed)
+        _thinkBody.innerHTML = '<span class="gwen-thinking"><span class="gwen-crown">&#x1F451;</span><span class="gwen-think-text">' + (label || 'Pondering') + '</span></span>';
+        _thinkMsg._spinner = { destroy() {}, stop() {} }; // ponytail: no-op, CSS handles animation
         _thinkMsg.appendChild(_thinkBody);
         document.getElementById('chat-history').appendChild(_thinkMsg);
         uiModule.scrollHistory();
