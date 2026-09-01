@@ -3451,4 +3451,8 @@ async def stream_agent_loop(
         except Exception as _esc_err:
             logger.warning(f"teacher escalation hook failed: {_esc_err}", exc_info=True)
 
+    # ponytail: emit selected tools so caller can cache for continuations
+    if _relevant_tools:
+        yield f'data: {json.dumps({"type": "tool_cache", "tools": sorted(_relevant_tools)})}\n\n'
+
     yield "data: [DONE]\n\n"

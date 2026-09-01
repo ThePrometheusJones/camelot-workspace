@@ -3,10 +3,11 @@
 import asyncio
 import json
 import os
+import re
 import time
 import logging
 from datetime import datetime
-from typing import Dict, Any, AsyncGenerator, List, Optional
+from typing import Dict, Any, AsyncGenerator, List, Optional, Set
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
 from fastapi.responses import StreamingResponse
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
+
+# ponytail: cache selected tools per session so continuations keep them
+_session_tool_cache: Dict[str, Set[str]] = {}
+_CONTINUATION_RE = re.compile(r"hit the step limit|continue.*where.*left off|still working|stream dropped")
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -1256,6 +1261,12 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
 
+                    # Restore cached tools for continuation messages
+                    _restored_tools = None
+                    if _CONTINUATION_RE.search(message or "") and session in _session_tool_cache:
+                        _restored_tools = _session_tool_cache[session]
+                        logger.info("[tool-cache] Restoring %d cached tools for continuation in session %s", len(_restored_tools), session)
+
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
@@ -1277,6 +1288,7 @@ def setup_chat_routes(
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
                         workspace=workspace or None,
+                        relevant_tools=_restored_tools,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1305,6 +1317,9 @@ def setup_chat_routes(
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
                                     yield chunk
+                                elif data.get("type") == "tool_cache":
+                                    _session_tool_cache[session] = set(data.get("tools", []))
+                                    continue  # internal-only, don't forward to client
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
                                     # Forward the notice and remember the real

@@ -42,6 +42,13 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # Read file is fundamental — prompts routinely reference files to read
+    # and RAG drops it when the query has no file-related keywords.
+    "read_file",
+    # Email is core assistant functionality — RAG misses it when the task
+    # arrives via file indirection or doesn't contain email keywords.
+    "list_email_accounts", "list_emails", "read_email", "send_email",
+    "reply_to_email", "archive_email",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -70,7 +77,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "bash": "Run shell commands on the server. Install packages, git operations, builds, system info, process management. Prefer a dedicated tool whenever one fits the job (file read/write/edit, search, listing); use bash only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
-    "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
+    "web_fetch": "Fetch and read the text content of a URL. Uses a stealth headless browser that handles Cloudflare/bot protection — this is already the strongest fetcher available. If it still returns a 403 or empty page, the site is genuinely blocking; try Playwright MCP tools as a last resort, or move on to another source. Use when you have a concrete URL; for open-ended lookups use web_search instead.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
@@ -403,6 +410,13 @@ class ToolIndex:
                    "google", "latest", "current", "news", "weather",
                    "forecast", "stock price", "price of"}):
             {"web_search", "web_fetch"},
+        # Listing sites / bot-walled pages — web_fetch is stealth browser,
+        # Playwright MCP tools are the fallback when even that gets blocked
+        frozenset({"browse", "browser", "navigate", "open the site", "open the page",
+                   "go to the site", "visit the site", "listing", "listings",
+                   "cargurus", "autotrader", "carmax", "carvana", "edmunds", "kbb", "cars.com"}):
+            {"web_fetch", "browser_navigate", "browser_click", "browser_snapshot",
+             "browser_fill_form", "browser_find", "browser_tabs", "browser_evaluate"},
         frozenset({"research", "reserach", "reasearch", "look into", "investigate",
                    "deep dive", "deep research", "find out about", "study up on",
                    "report on", "do research", "look up everything"}):
