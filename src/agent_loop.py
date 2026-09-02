@@ -186,6 +186,7 @@ _AGENT_RULES = """\
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- NEVER present inferred or guessed information as if a tool returned it. If a tool returns incomplete data (empty body, unreadable attachments, truncated output), say what is missing rather than filling the gap. "I don't have that data" is always preferred over a plausible guess.
 """
 
 _API_AGENT_RULES = """\
@@ -199,6 +200,7 @@ _API_AGENT_RULES = """\
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- NEVER present inferred or guessed information as if a tool returned it. If a tool returns incomplete data (empty body, unreadable attachments, truncated output), say what is missing rather than filling the gap. "I don't have that data" is always preferred over a plausible guess.
 """
 
 _LINK_RULES = """\

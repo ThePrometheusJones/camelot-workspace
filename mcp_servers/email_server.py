@@ -2184,10 +2184,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             if result.get('attachments'):
                 text += f"\n**Attachments ({len(result['attachments'])}):**\n"
+                image_atts = []
                 for a in result['attachments']:
                     size_kb = a['size'] // 1024
                     text += f"  - [{a['index']}] {a['filename']} ({a['content_type']}, {size_kb}KB)\n"
+                    if a['content_type'].startswith('image/'):
+                        image_atts.append(a['filename'])
                 text += "\n_Use `download_attachment` with the UID and index to download._\n"
+                if image_atts:
+                    text += (
+                        f"\n⚠️ This email has {len(image_atts)} image attachment(s) "
+                        f"whose contents are NOT included in this text output.\n"
+                        f"You CANNOT see their contents. Do NOT guess, infer, or fabricate what they contain.\n"
+                        f"To read image attachments: ask the user to describe them, or use "
+                        f"`download_attachment` to save them to disk.\n"
+                        f"Image attachments: {', '.join(image_atts)}\n"
+                    )
             text += f"\n---\n\n{result['body']}"
             return [TextContent(type="text", text=text)]
 
