@@ -2121,9 +2121,14 @@ async def stream_agent_loop(
 
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
+    # ponytail: send_all_tools bypasses RAG filtering — all tools always available
+    _send_all = bool(get_setting("send_all_tools", False))
     _relevant_tools = set() if guide_only else relevant_tools
     _t1 = time.time()
-    if _relevant_tools:
+    if _send_all and not guide_only and not relevant_tools:
+        _relevant_tools = None
+        logger.info("[tool-rag] send_all_tools=true, skipping RAG tool selection")
+    elif _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and bool(_intent.get("low_signal")):
         from src.tool_index import ALWAYS_AVAILABLE
