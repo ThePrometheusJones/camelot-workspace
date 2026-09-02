@@ -181,6 +181,13 @@ def compute_next_run(schedule: str, scheduled_time: str,
                 candidate = last.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return _to_utc_naive(candidate) if tz is not None else candidate
 
+    if schedule == "hourly":
+        # Fire at :MM past every hour, using the minute from scheduled_time
+        candidate = now.replace(minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(hours=1)
+        return _to_utc_naive(candidate) if tz is not None else candidate
+
     return None
 
 
@@ -400,6 +407,37 @@ class TaskScheduler:
                 db.close()
         except Exception as e:
             logger.warning(f"Could not advance overdue next_run on startup: {e}")
+
+        # Seed next_run for active scheduled tasks that were never assigned one
+        # (e.g. hourly tasks created before the hourly handler existed).
+        try:
+            from core.database import SessionLocal as _SL2, ScheduledTask as _ST2
+            db = _SL2()
+            try:
+                unseeded = db.query(_ST2).filter(
+                    _ST2.status == "active",
+                    _ST2.next_run.is_(None),
+                    _ST2.trigger_type == "schedule",
+                    _ST2.schedule.isnot(None),
+                ).all()
+                seeded = 0
+                for t in unseeded:
+                    nr = compute_next_run(
+                        t.schedule, t.scheduled_time,
+                        t.scheduled_day, t.scheduled_date,
+                        cron_expression=t.cron_expression,
+                        tz_name=_resolve_task_timezone(db, t),
+                    )
+                    if nr:
+                        t.next_run = nr
+                        seeded += 1
+                if seeded:
+                    db.commit()
+                    logger.info("Seeded next_run for %d active tasks with NULL next_run on startup", seeded)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Could not seed NULL next_run on startup: {e}")
 
         # Defense-in-depth dedupe sweep: for any owner with >1 rows where
         # is_default_assistant=True, keep the oldest and demote the rest +
