@@ -729,6 +729,23 @@ def _search_emails(query, folders=None, max_results=20, account=None):
     return out[: max_results * len(folders)]
 
 
+def _ocr_image_bytes(payload: bytes) -> str | None:
+    """Run tesseract OCR on raw image bytes. CPU only, no GPU."""
+    import subprocess, tempfile
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+        tmp.write(payload)
+        tmp.flush()
+        try:
+            result = subprocess.run(
+                ["tesseract", tmp.name, "-", "--psm", "6"],
+                capture_output=True, timeout=30,
+            )
+            text = result.stdout.decode("utf-8", errors="replace").strip()
+            return text if text else None
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+
 def _list_attachments_from_msg(msg):
     """Return attachment metadata."""
     if not msg.is_multipart():
@@ -749,12 +766,16 @@ def _list_attachments_from_msg(msg):
             filename = f"attachment_{idx}"
         payload = part.get_payload(decode=True)
         size = len(payload) if payload else 0
-        attachments.append({
+        entry = {
             "index": idx,
             "filename": filename,
             "content_type": ct,
             "size": size,
-        })
+        }
+        # ponytail: carry raw bytes for image/* so call_tool can OCR without re-fetch
+        if ct.startswith("image/") and payload:
+            entry["_payload"] = payload
+        attachments.append(entry)
         idx += 1
     return attachments
 
@@ -1042,7 +1063,14 @@ def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, b
     is NOT SMTPed — instead it lands in scheduled_emails as an
     `agent_draft` row and the user reviews + approves it from the chat
     UI. This closes the auto-send hole that let earlier models invent
-    signatures and ship them to real recipients without confirmation."""
+    signatures and ship them to real recipients without confirmation.
+
+    Lesson (session 30e87a4f, 2026-09-01): tool success messages are
+    tool-asserted, not verified. The old call_tool handler returned "Sent
+    email to..." even when the draft was stashed, and the model wrote a
+    tracker citing those payloads as proof of delivery. Side-effecting
+    tools must be verified against the target system (e.g. Sent folder
+    via IMAP) in any audit — a tool return is not ground truth."""
     if _read_agent_email_confirm_setting():
         # Even confirmation-first sends must resolve the selected account now.
         # Otherwise a caller could stage a pending draft against another
@@ -1088,6 +1116,7 @@ def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, b
 
     sent_folder = None
     sent_uid = None
+    sent_confirmed = False
     try:
         imap = _imap_connect(send_account)
         try:
@@ -1097,6 +1126,7 @@ def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, b
                 m = re.search(rb"APPENDUID\s+\d+\s+(\d+)", append_data[0] or b"")
                 if m:
                     sent_uid = m.group(1).decode("ascii", errors="ignore")
+                sent_confirmed = True
         finally:
             imap.logout()
     except Exception:
@@ -1106,6 +1136,7 @@ def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, b
 
     return {
         "sent": True,
+        "sent_confirmed": sent_confirmed,
         "to": recipients,
         "subject": subject,
         "account": cfg.get("account_name"),
@@ -2184,22 +2215,53 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             if result.get('attachments'):
                 text += f"\n**Attachments ({len(result['attachments'])}):**\n"
-                image_atts = []
+                non_image_atts = []
+                ocr_blocks = []
+                _ocr_total_chars = 0
+                _OCR_MIN_IMAGE_BYTES = 10_000   # skip icons/signatures under 10KB
+                _OCR_MAX_CHARS_PER_EMAIL = 8000  # cap total OCR text per email
                 for a in result['attachments']:
                     size_kb = a['size'] // 1024
                     text += f"  - [{a['index']}] {a['filename']} ({a['content_type']}, {size_kb}KB)\n"
-                    if a['content_type'].startswith('image/'):
-                        image_atts.append(a['filename'])
-                text += "\n_Use `download_attachment` with the UID and index to download._\n"
-                if image_atts:
-                    text += (
-                        f"\n⚠️ This email has {len(image_atts)} image attachment(s) "
-                        f"whose contents are NOT included in this text output.\n"
-                        f"You CANNOT see their contents. Do NOT guess, infer, or fabricate what they contain.\n"
-                        f"To read image attachments: ask the user to describe them, or use "
-                        f"`download_attachment` to save them to disk.\n"
-                        f"Image attachments: {', '.join(image_atts)}\n"
-                    )
+                    if a['content_type'].startswith('image/') and a.get('_payload'):
+                        if a['size'] < _OCR_MIN_IMAGE_BYTES:
+                            # ponytail: skip tiny images (icons, signatures, tracking pixels)
+                            continue
+                        if _ocr_total_chars >= _OCR_MAX_CHARS_PER_EMAIL:
+                            ocr_blocks.append(
+                                f"\n⚠️ {a['filename']}: OCR cap reached ({_OCR_MAX_CHARS_PER_EMAIL} chars). "
+                                f"Use `download_attachment` to save this image to disk.\n"
+                            )
+                            continue
+                        ocr_text = _ocr_image_bytes(a['_payload'])
+                        if ocr_text:
+                            # Trim to remaining budget
+                            remaining = _OCR_MAX_CHARS_PER_EMAIL - _ocr_total_chars
+                            if len(ocr_text) > remaining:
+                                ocr_text = ocr_text[:remaining] + "\n[... OCR truncated]"
+                            _ocr_total_chars += len(ocr_text)
+                            ocr_blocks.append(
+                                f"\n--- OCR of {a['filename']} (machine-extracted, may contain errors) ---\n"
+                                f"{ocr_text}\n"
+                                f"--- end OCR ---\n"
+                            )
+                        else:
+                            ocr_blocks.append(
+                                f"\n⚠️ {a['filename']}: image attachment — OCR returned nothing. "
+                                f"You CANNOT see its contents. Do NOT guess or fabricate what it contains. "
+                                f"Ask the user to describe it.\n"
+                            )
+                    elif a['content_type'].startswith(('audio/', 'video/')) or a['content_type'] in ('image/heic', 'image/heif'):
+                        ocr_blocks.append(
+                            f"\n⚠️ {a['filename']}: attachment type {a['content_type']} — "
+                            f"no OCR or transcription available. Ask the user to describe its contents.\n"
+                        )
+                    elif not a['content_type'].startswith('image/'):
+                        non_image_atts.append(a['filename'])
+                if non_image_atts:
+                    text += f"\n_Use `download_attachment` with the UID and index to download: {', '.join(non_image_atts)}_\n"
+                for block in ocr_blocks:
+                    text += block
             text += f"\n---\n\n{result['body']}"
             return [TextContent(type="text", text=text)]
 
@@ -2217,8 +2279,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 bcc=arguments.get("bcc"),
                 account=acct,
             )
+            if result.get("pending"):
+                return [TextContent(type="text", text=(
+                    f"Draft queued for Ken's approval — NOT sent.\n"
+                    f"To: {result['to']}\nSubject: {result['subject']}\n"
+                    f"Pending ID: {result.get('pending_id', '?')}"
+                ))]
             acct_note = f" (from {result['account']})" if result.get("account") else ""
-            return [TextContent(type="text", text=f"Sent email to {result['to']} with subject '{result['subject']}'{acct_note}.")]
+            if result.get("sent_confirmed"):
+                status = f"Sent and confirmed in Sent folder (UID {result.get('sent_uid', '?')})"
+            else:
+                status = "SMTP accepted, not confirmed in Sent folder"
+            return [TextContent(type="text", text=f"{status}: email to {result['to']} with subject '{result['subject']}'{acct_note}.")]
 
         elif name == "draft_email":
             to = arguments.get("to")
@@ -2259,12 +2331,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             if "error" in result:
                 return [TextContent(type="text", text=f"Error: {result['error']}")]
+            if result.get("pending"):
+                return [TextContent(type="text", text=(
+                    f"Reply draft queued for Ken's approval — NOT sent.\n"
+                    f"To: {result['to']}\nSubject: {result['subject']}\n"
+                    f"Pending ID: {result.get('pending_id', '?')}"
+                ))]
             # Mark original as answered
             try:
                 _set_flag(uid, arguments.get("folder", "INBOX"), "\\Answered", add=True, account=acct)
             except Exception:
                 pass
-            return [TextContent(type="text", text=f"Replied to UID {uid}: '{result['subject']}' → {result['to']}")]
+            if result.get("sent_confirmed"):
+                status = f"Replied and confirmed in Sent folder"
+            else:
+                status = "SMTP accepted, not confirmed in Sent folder"
+            return [TextContent(type="text", text=f"{status}: UID {uid}: '{result['subject']}' → {result['to']}")]
 
         elif name == "draft_email_reply":
             uid = arguments.get("uid")

@@ -2297,15 +2297,36 @@ def setup_email_routes():
             conn.row_factory = sqlite3.Row
             # The MCP server can't easily set owner, so it stores '' — fall
             # back to those rows in addition to the caller's owner.
-            rows = conn.execute(
-                """SELECT id, to_addr, subject, body, created_at, account_id
-                   FROM scheduled_emails
-                   WHERE status = 'agent_draft' AND (owner = ? OR owner = '')
-                   ORDER BY created_at DESC""",
-                (owner or "",),
-            ).fetchall()
+            # provenance column may not exist yet (added by honesty-fixes)
+            try:
+                rows = conn.execute(
+                    """SELECT id, to_addr, subject, body, created_at, account_id, provenance
+                       FROM scheduled_emails
+                       WHERE status = 'agent_draft' AND (owner = ? OR owner = '')
+                       ORDER BY created_at DESC""",
+                    (owner or "",),
+                ).fetchall()
+            except Exception:
+                rows = conn.execute(
+                    """SELECT id, to_addr, subject, body, created_at, account_id
+                       FROM scheduled_emails
+                       WHERE status = 'agent_draft' AND (owner = ? OR owner = '')
+                       ORDER BY created_at DESC""",
+                    (owner or "",),
+                ).fetchall()
             conn.close()
-            return {"pending": [dict(r) for r in rows]}
+            pending = []
+            for r in rows:
+                d = dict(r)
+                # Parse provenance JSON if present
+                prov_raw = d.pop("provenance", None)
+                if prov_raw:
+                    try:
+                        d["provenance"] = json.loads(prov_raw)
+                    except Exception:
+                        d["provenance"] = None
+                pending.append(d)
+            return {"pending": pending}
         except Exception as e:
             logger.error(f"list_pending_agent_drafts failed: {e}")
             return {"pending": [], "error": "Mail operation failed"}

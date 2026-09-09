@@ -1884,6 +1884,113 @@ _VERIFIER_EFFECTFUL_TOOLS = {
 }
 _VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
 
+# Zero-tool-call claim detector pattern: past-tense verb + object
+# Zero-tool-call claim detector: first-person subject + past-tense action verb + object.
+# Requires "I"/"I've"/"I have"/"we" before the verb. Excludes negations and
+# conversational uses ("I read your message", "I found your point").
+_ZERO_TOOL_CLAIM_PAT = re.compile(
+    r'\bI(?:\'ve|\'ll|\s+have|\s+just|\s+already)?\s+'
+    r'(?:read|saved|deleted|verified|confirmed|checked|listed|found|sent|searched|removed|updated|wrote|created|logged|scanned)\b'
+    r'(?:\s+(?:the|a|an|all|both|it|them|this|that|those|each|every|your|my|his|her|our)\b|\s+\w)',
+    re.IGNORECASE,
+)
+_ZERO_TOOL_NEGATION_PAT = re.compile(
+    r'\b(?:never|not|n\'t|didn\'t|couldn\'t|haven\'t|hasn\'t|don\'t|cannot|can\'t|wasn\'t|weren\'t)\b',
+    re.IGNORECASE,
+)
+# Conversational objects that don't imply tool use
+_ZERO_TOOL_CONVERSATIONAL = re.compile(
+    r'\b(?:your\s+(?:message|point|question|concern|note|email|request|feedback|thought|idea|comment|input|words?|meaning)'
+    r'|(?:it|that)\s+(?:convincing|interesting|helpful|clear|useful|important|fair|right|true))',
+    re.IGNORECASE,
+)
+
+
+def _detect_zero_tool_claim(text: str) -> bool:
+    """Return True if text contains a first-person claim of completed action
+    that implies a tool call, excluding negations and conversational uses."""
+    for m in _ZERO_TOOL_CLAIM_PAT.finditer(text):
+        matched = m.group()
+        start = max(0, m.start() - 30)
+        context = text[start:m.end() + 40]
+        # Skip if negation precedes the verb in the surrounding context
+        pre_context = text[start:m.start() + len(matched.split()[0]) + 1]
+        if _ZERO_TOOL_NEGATION_PAT.search(pre_context):
+            continue
+        # Skip conversational uses
+        post_verb = text[m.start():m.end() + 60]
+        if _ZERO_TOOL_CONVERSATIONAL.search(post_verb):
+            continue
+        return True
+    return False
+
+
+def _extract_provenance_claims(body: str) -> list[dict]:
+    """Extract dollar amounts, mileage figures, and quoted strings from an email body."""
+    claims = []
+    # Dollar amounts: $12,999 or $12.99 or $1,234,567.89
+    for m in re.finditer(r'\$[\d,]+(?:\.\d{1,2})?', body):
+        claims.append({"type": "dollar", "value": m.group()})
+    # Mileage: 69k miles, 69,000 miles, 69000 miles
+    for m in re.finditer(r'(\d[\d,]*k?\s*miles)', body, re.IGNORECASE):
+        claims.append({"type": "mileage", "value": m.group().strip()})
+    # Quoted strings (double quotes, 4+ chars to skip trivial quotes)
+    for m in re.finditer(r'"([^"]{4,})"', body):
+        claims.append({"type": "quoted", "value": m.group(1)})
+    return claims
+
+
+def _check_provenance(body: str, tool_events: list) -> list[dict]:
+    """Check whether claims in an email body are grounded in tool results.
+    Returns list of {type, value, grounded} dicts.
+
+    NOTE: provenance trusts tool results as ground truth. If a manage_memory
+    search returns contaminated data (e.g. a hallucinated figure that was
+    previously saved as a memory), the claim reads as "grounded" even though
+    the underlying data is wrong. Provenance flags source-presence, not
+    source-correctness."""
+    claims = _extract_provenance_claims(body)
+    if not claims:
+        return []
+    # Build one big text from all tool outputs in the session
+    tool_text = "\n".join(
+        str(ev.get("output", "")) for ev in tool_events if ev.get("output")
+    )
+    # ponytail: normalize tool text once — strip commas and periods from numeric contexts
+    tool_text_norm = tool_text.replace(",", "").replace(".", "")
+    for claim in claims:
+        val = claim["value"]
+        if val in tool_text:
+            claim["grounded"] = True
+        else:
+            # Strip $, commas, periods for fuzzy numeric match (OCR: "12.999" vs "$12,999")
+            normalized = val.replace(",", "").replace("$", "").replace(".", "").strip()
+            claim["grounded"] = normalized in tool_text_norm
+    return claims
+
+
+def _attach_provenance_to_draft(pending_id: str, claims: list[dict]) -> None:
+    """Store provenance flags on a pending agent_draft row."""
+    if not claims or not pending_id:
+        return
+    try:
+        import sqlite3
+        from src.constants import SCHEDULED_EMAILS_DB
+        conn = sqlite3.connect(SCHEDULED_EMAILS_DB)
+        # Add provenance column if missing
+        try:
+            conn.execute("ALTER TABLE scheduled_emails ADD COLUMN provenance TEXT")
+        except Exception:
+            pass  # column already exists
+        conn.execute(
+            "UPDATE scheduled_emails SET provenance = ? WHERE id = ?",
+            (json.dumps(claims), pending_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("Failed to attach provenance to draft %s: %s", pending_id, e)
+
 
 def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
     """Compact record of what the agent actually did this turn, for the
@@ -2526,6 +2633,8 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    _zero_tool_claim_count = 0
+    _MAX_ZERO_TOOL_CLAIMS = 1  # fire once, then let the model respond
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -2880,6 +2989,63 @@ async def stream_agent_loop(
         round_texts.append(cleaned_round)
 
         if not tool_blocks:
+            # ── Zero-tool-call claim detector (E) ─────────────────────
+            # If the ENTIRE turn has zero tool calls but the model claims
+            # it completed an action (first-person past tense + object),
+            # flag the message. Injection is behind a setting (default off)
+            # to measure false positives before correcting mid-turn.
+            if not tool_events:
+                _resp_text = _THINK_RE.sub("", cleaned_round).strip()
+                if _resp_text and _detect_zero_tool_claim(_resp_text):
+                    _zero_tool_claim_count += 1
+                    logger.warning(
+                        "[agent] zero-tool-call claim detected on round %d: model asserted action with no tool calls",
+                        round_num,
+                    )
+                    # Always flag in DB
+                    if session_id:
+                        try:
+                            from core.database import SessionLocal, ChatMessage
+                            _flag_db = SessionLocal()
+                            _flag_msg = _flag_db.query(ChatMessage).filter(
+                                ChatMessage.session_id == session_id,
+                                ChatMessage.role == "assistant",
+                            ).order_by(ChatMessage.timestamp.desc()).first()
+                            if _flag_msg:
+                                _meta = json.loads(_flag_msg.metadata or "{}")
+                                _meta["flagged_zero_tool_claim"] = True
+                                _meta["zero_tool_claim_count"] = _zero_tool_claim_count
+                                _flag_msg.metadata = json.dumps(_meta)
+                                _flag_db.commit()
+                            _flag_db.close()
+                        except Exception as _fe:
+                            logger.warning("Failed to flag zero-tool-claim message: %s", _fe)
+
+                    if _zero_tool_claim_count == 1 and get_setting("zero_tool_claim_inject", False):
+                        # First detection with injection enabled: correct the model
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "You made no tool calls this turn. Any statement that you "
+                                "read, saved, deleted, verified, or checked something is "
+                                "false. Retract it before continuing."
+                            ),
+                        })
+                        _warn = "\n\n⚠️ **No tool calls were made this turn. Claims of completed actions are unverified.**\n\n"
+                        yield f'data: {json.dumps({"delta": _warn})}\n\n'
+                        full_response += _warn
+                        continue
+                    elif _zero_tool_claim_count > 1:
+                        # Retraction round still claimed — emit "unresolved" but don't inject again
+                        _warn = "\n\n⚠️ **Unresolved: model repeated action claims with zero tool calls.**\n\n"
+                        yield f'data: {json.dumps({"delta": _warn})}\n\n'
+                        full_response += _warn
+                    else:
+                        # Injection off (default): flag-only, emit warning, don't inject
+                        _warn = "\n\n⚠️ **No tool calls were made this turn. Claims of completed actions are unverified.**\n\n"
+                        yield f'data: {json.dumps({"delta": _warn})}\n\n'
+                        full_response += _warn
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -3374,6 +3540,30 @@ async def stream_agent_loop(
             tool_events.append(tool_event)
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
+
+            # ponytail: provenance check for pending email drafts
+            if block.tool_type in ("send_email", "reply_to_email"):
+                _stdout = result.get("stdout") or result.get("output") or ""
+                if "NOT sent" in _stdout or "pending" in _stdout.lower():
+                    # Extract pending_id from output
+                    _pid_m = re.search(r'Pending ID:\s*(\S+)', _stdout)
+                    _pid = _pid_m.group(1) if _pid_m else None
+                    # Extract email body from tool arguments
+                    try:
+                        _args = json.loads(block.content) if block.content.strip().startswith("{") else {}
+                    except Exception:
+                        _args = {}
+                    _email_body = _args.get("body", block.content)
+                    _prov = _check_provenance(_email_body, tool_events)
+                    if _prov:
+                        _attach_provenance_to_draft(_pid, _prov)
+                        # Emit provenance to stream so model and UI see it
+                        _prov_lines = []
+                        for _c in _prov:
+                            _tag = "grounded" if _c["grounded"] else "NOT found in any tool result"
+                            _prov_lines.append(f"  {_c['type']}: {_c['value']} → {_tag}")
+                        _prov_text = "\n**Provenance check:**\n" + "\n".join(_prov_lines) + "\n"
+                        yield 'data: ' + json.dumps({"delta": _prov_text}) + '\n\n'
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
