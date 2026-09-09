@@ -214,6 +214,56 @@ def setup_history_routes(session_manager) -> APIRouter:
             logger.error(f"Delete messages error {session_id}: {e}")
             raise HTTPException(500, str(e))
 
+    @router.post("/api/session/{session_id}/retract-message")
+    async def retract_message(request: Request, session_id: str):
+        """Toggle retraction on an assistant message. Retracted messages stay
+        in the DB but are replaced in model context with a one-line notice.
+        When any retracted message exists in the session, send_email,
+        reply_to_email, and manage_memory add/edit/delete are stripped from
+        the shipped tool set (read-only until cleared)."""
+        _verify_session_owner(request, session_id)
+        try:
+            body = await request.json()
+            msg_id = body.get("msg_id")
+            retract = body.get("retract", True)  # True to retract, False to clear
+            if not msg_id:
+                raise HTTPException(400, "msg_id is required")
+
+            session = session_manager.get_session(session_id)
+            db = SessionLocal()
+            try:
+                db_msg = db.query(DbChatMessage).filter(
+                    DbChatMessage.id == msg_id,
+                    DbChatMessage.session_id == session_id,
+                    DbChatMessage.role == "assistant",
+                ).first()
+                if not db_msg:
+                    raise HTTPException(404, "Assistant message not found")
+
+                import json as _json
+                meta = _json.loads(db_msg.metadata or "{}")
+                meta["retracted"] = bool(retract)
+                db_msg.metadata = _json.dumps(meta)
+                db.commit()
+
+                # Update in-memory history too
+                for m in session.history:
+                    mem_meta = m.metadata if isinstance(m, ChatMessage) else (m.get("metadata") if isinstance(m, dict) else None)
+                    if isinstance(mem_meta, dict) and mem_meta.get("_db_id") == msg_id:
+                        mem_meta["retracted"] = bool(retract)
+                        break
+
+                return {"status": "ok", "retracted": bool(retract), "msg_id": msg_id}
+            finally:
+                db.close()
+        except HTTPException:
+            raise
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+        except Exception as e:
+            logger.error(f"Retract message error {session_id}: {e}")
+            raise HTTPException(500, str(e))
+
     @router.post("/api/session/{session_id}/edit-message")
     async def edit_message(request: Request, session_id: str):
         """Edit the content of a message by its database ID."""

@@ -1410,6 +1410,10 @@ export function createMsgFooter(msgElement) {
       e.stopPropagation();
       if (window.chatModule?.forkFrom) window.chatModule.forkFrom(msgElement);
     }},
+    { id: 'retract', icon: '\u26A0', title: 'Retract as fabricated', cls: 'msg-action-btn msg-retract-btn', handler(e) {
+      e.stopPropagation();
+      if (window.chatModule?.retractMessage) window.chatModule.retractMessage(msgElement);
+    }},
     { id: 'delete', icon: '\u2715', title: 'Delete message', cls: 'msg-action-btn msg-delete-btn', handler(e) {
       e.stopPropagation();
       if (window.chatModule?.deleteMessage) window.chatModule.deleteMessage(msgElement);
@@ -2009,7 +2013,7 @@ export function addMessage(role, content, modelName, metadata) {
 
         if (txt) {
           const wrap = document.createElement('div');
-          wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '');
+          wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '') + (metadata?.retracted ? ' msg-retracted' : '');
           const roleEl = document.createElement('div');
           roleEl.className = 'role';
           const pair = replyModelPair(modelName, metadata);
@@ -2121,6 +2125,23 @@ export function addMessage(role, content, modelName, metadata) {
       const firstWrap = lastMsgAi || lastWrap;
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
+        // Tool count badge + zero-tool-claim marker
+        const _toolCount = (metadata?.tool_events || []).length;
+        const _roleEl = firstWrap.querySelector('.role');
+        if (_roleEl) {
+          const badge = document.createElement('span');
+          badge.className = 'tool-count-badge';
+          badge.textContent = _toolCount + ' tool call' + (_toolCount !== 1 ? 's' : '');
+          badge.title = _toolCount === 0 ? 'No tools were called this turn' : _toolCount + ' tool calls';
+          _roleEl.appendChild(badge);
+          if (metadata?.flagged_zero_tool_claim) {
+            const flag = document.createElement('span');
+            flag.className = 'zero-tool-flag';
+            flag.textContent = '\u26A0 unverified';
+            flag.title = 'Model claimed completed actions with no tool calls';
+            _roleEl.appendChild(flag);
+          }
+        }
         firstWrap.appendChild(createMsgFooter(firstWrap));
         if (metadata) displayMetrics(firstWrap, metadata);
       }
@@ -2156,7 +2177,7 @@ export function addMessage(role, content, modelName, metadata) {
 
     // --- Standard single-bubble message ---
     const wrap = document.createElement('div');
-    wrap.className = 'msg ' + (role === 'user' ? 'msg-user' : 'msg-ai');
+    wrap.className = 'msg ' + (role === 'user' ? 'msg-user' : 'msg-ai') + (role !== 'user' && metadata?.retracted ? ' msg-retracted' : '');
 
     const r = document.createElement('div');
     r.className = 'role';
@@ -2180,6 +2201,21 @@ export function addMessage(role, content, modelName, metadata) {
       }
       if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
       r.appendChild(roleTimestamp(metadata?.timestamp));
+      // Tool count badge for non-agent messages (chat mode assistant replies)
+      if (!isSlash && !isCompacted) {
+        const _tc = (metadata?.tool_events || []).length;
+        const badge = document.createElement('span');
+        badge.className = 'tool-count-badge';
+        badge.textContent = _tc + ' tool call' + (_tc !== 1 ? 's' : '');
+        r.appendChild(badge);
+        if (metadata?.flagged_zero_tool_claim) {
+          const flag = document.createElement('span');
+          flag.className = 'zero-tool-flag';
+          flag.textContent = '\u26A0 unverified';
+          flag.title = 'Model claimed completed actions with no tool calls';
+          r.appendChild(flag);
+        }
+      }
     }
 
     const b = document.createElement('div');

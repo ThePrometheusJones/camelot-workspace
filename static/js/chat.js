@@ -4582,6 +4582,44 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   }
 
   /**
+   * Retract an assistant message as fabricated. The message stays in history
+   * but is replaced in model context with a retraction notice. While any
+   * retracted message exists, outbound tools (email, memory writes) are locked.
+   */
+  export async function retractMessage(msgElement) {
+    const msgId = msgElement.dataset?.dbId;
+    const sessionId = sessionModule.getCurrentSessionId();
+    if (!msgId || !sessionId) return;
+
+    const isRetracted = msgElement.classList.contains('msg-retracted');
+    const action = isRetracted ? 'Clear retraction' : 'Retract as fabricated';
+    if (uiModule && uiModule.styledConfirm) {
+      const ok = await uiModule.styledConfirm(
+        isRetracted
+          ? 'Clear retraction and restore this message to context?'
+          : 'Retract this message? It will be excluded from model context and outbound tools will be locked for this session.',
+        { confirmText: action, cancelText: 'Cancel', danger: !isRetracted }
+      );
+      if (!ok) return;
+    }
+
+    try {
+      const res = await fetch(`/api/session/${sessionId}/retract-message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msg_id: msgId, retract: !isRetracted }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      msgElement.classList.toggle('msg-retracted', !isRetracted);
+      // Update retract button title
+      const retractBtn = msgElement.querySelector('[data-action="retract"]');
+      if (retractBtn) retractBtn.title = isRetracted ? 'Retract as fabricated' : 'Clear retraction';
+    } catch (err) {
+      console.error('Retract failed:', err);
+    }
+  }
+
+  /**
    * Delete an AI message and its preceding user message from the conversation.
    */
   export async function deleteMessage(msgElement) {
@@ -5080,6 +5118,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     editAIMessage,
     resendUserMessage,
     deleteMessage,
+    retractMessage,
     rewriteWith,
     continueFrom,
     _appendViewReportLink,

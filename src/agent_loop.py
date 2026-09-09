@@ -1685,8 +1685,13 @@ def _build_base_prompt(
 
 
 def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int, is_api_model: bool = False):
-    """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
+    """Choose native function calls or fenced code block parsing.
+
+    Returns (tool_blocks, used_native, parse_pattern) where parse_pattern
+    is the regex pattern name that fired (None for native function calls).
+    """
     used_native = False
+    _parse_pattern = None  # set only when text-parsing fires
     if native_tool_calls:
         tool_blocks = []
         for tc in native_tool_calls:
@@ -1716,15 +1721,18 @@ def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num
         # those too. Non-native / textual-only models keep every pattern,
         # fenced blocks included, since that's their *only* tool channel.
         tool_blocks = parse_tool_blocks(round_response, skip_fenced=is_api_model)
+        # Capture which regex pattern fired (set by parse_tool_blocks)
+        from src.tool_parsing import last_matched_pattern
+        _parse_pattern = last_matched_pattern
         if tool_blocks:
-            logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
+            logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected (pattern={_parse_pattern})")
 
     resp_preview = round_response[:200].replace('\n', '\\n') if round_response else "(empty)"
     logger.info(f"Agent round {round_num} summary: {len(round_response)} chars, "
                 f"{len(native_tool_calls)} native calls, "
                 f"{len(tool_blocks)} tool blocks. Preview: {resp_preview}")
 
-    return tool_blocks, used_native
+    return tool_blocks, used_native, _parse_pattern
 
 
 def _append_tool_results(
@@ -2714,10 +2722,21 @@ async def stream_agent_loop(
                 ]
                 all_tool_schemas = base_schemas + mcp_schemas
             if disabled_tools:
+                def _is_disabled(schema_name: str) -> bool:
+                    if schema_name in disabled_tools:
+                        return True
+                    # MCP tools are namespaced mcp__{server}__{tool}; match
+                    # against the bare tool suffix so disabling "send_email"
+                    # also strips "mcp__camelot-email__send_email".
+                    if "__" in schema_name:
+                        bare = schema_name.rsplit("__", 1)[-1]
+                        if bare in disabled_tools:
+                            return True
+                    return False
                 all_tool_schemas = [
                     t for t in all_tool_schemas
-                    if t.get("function", {}).get("name") not in disabled_tools
-                    and t.get("name") not in disabled_tools
+                    if not _is_disabled(t.get("function", {}).get("name", ""))
+                    and not _is_disabled(t.get("name", ""))
                 ]
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
@@ -2901,7 +2920,7 @@ async def stream_agent_loop(
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
 
-        tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num, is_api_model=_is_api_model)
+        tool_blocks, used_native, _parse_pattern = _resolve_tool_blocks(round_response, native_tool_calls, round_num, is_api_model=_is_api_model)
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
@@ -3002,24 +3021,13 @@ async def stream_agent_loop(
                         "[agent] zero-tool-call claim detected on round %d: model asserted action with no tool calls",
                         round_num,
                     )
-                    # Always flag in DB
-                    if session_id:
-                        try:
-                            from core.database import SessionLocal, ChatMessage
-                            _flag_db = SessionLocal()
-                            _flag_msg = _flag_db.query(ChatMessage).filter(
-                                ChatMessage.session_id == session_id,
-                                ChatMessage.role == "assistant",
-                            ).order_by(ChatMessage.timestamp.desc()).first()
-                            if _flag_msg:
-                                _meta = json.loads(_flag_msg.metadata or "{}")
-                                _meta["flagged_zero_tool_claim"] = True
-                                _meta["zero_tool_claim_count"] = _zero_tool_claim_count
-                                _flag_msg.metadata = json.dumps(_meta)
-                                _flag_db.commit()
-                            _flag_db.close()
-                        except Exception as _fe:
-                            logger.warning("Failed to flag zero-tool-claim message: %s", _fe)
+                    # Emit flag as stream event — save_assistant_response
+                    # writes it into message metadata at commit time.
+                    # (Previous code opened a separate DB session mid-stream
+                    # and queried for "latest assistant message", but that
+                    # message hasn't been committed yet — it flagged the
+                    # PREVIOUS turn's message or nothing at all.)
+                    yield f'data: {json.dumps({"type": "zero_tool_claim", "count": _zero_tool_claim_count})}\n\n'
 
                     if _zero_tool_claim_count == 1 and get_setting("zero_tool_claim_inject", False):
                         # First detection with injection enabled: correct the model
@@ -3526,6 +3534,10 @@ async def stream_agent_loop(
                 "output": output_text,
                 "exit_code": result.get("exit_code"),
             }
+            # ponytail: track which parse pattern matched (fenced, xml_invoke, bracket_marker, etc.)
+            # None means native function call (no regex parsing needed).
+            if _parse_pattern:
+                tool_event["parse_pattern"] = _parse_pattern
             if result.get("image_url"):
                 for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                     if result.get(ik):
@@ -3627,6 +3639,8 @@ async def stream_agent_loop(
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
+    if _relevant_tools:
+        metrics["shipped_tools"] = sorted(_relevant_tools)
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

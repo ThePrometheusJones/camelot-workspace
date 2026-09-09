@@ -861,6 +861,16 @@ def setup_chat_routes(
             if chat_mode == 'chat':
                 disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "web_fetch", "search_chats", "manage_tasks"})
 
+        # Retraction lockdown: when any assistant message in this session has
+        # been retracted (flagged as fabricated), strip tools that can send
+        # outbound messages or mutate persistent memory. Read-only until the
+        # user clears the retraction from the UI.
+        if sess.has_retracted_messages():
+            disabled_tools.update({
+                "send_email", "reply_to_email",
+                "manage_memory",  # ponytail: blocks add/edit/delete; search/list still work via the action param check in the handler
+            })
+
         # Plan mode: investigate read-only, propose a plan, don't mutate. Block
         # every tool not on the read-only allowlist. (stream_agent_loop enforces
         # this again + drops MCP, so this is belt-and-suspenders.)
@@ -1246,6 +1256,7 @@ def setup_chat_routes(
                 # ── Agent mode: full agent loop with tools ──
                 _agent_rounds = 0
                 _agent_tool_calls = 0
+                _zero_tool_claim_count = 0
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
@@ -1317,6 +1328,9 @@ def setup_chat_routes(
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
                                     yield chunk
+                                elif data.get("type") == "zero_tool_claim":
+                                    _zero_tool_claim_count = data.get("count", 1)
+                                    yield chunk  # forward to client for badge
                                 elif data.get("type") == "tool_cache":
                                     _session_tool_cache[session] = set(data.get("tools", []))
                                     continue  # internal-only, don't forward to client
@@ -1352,6 +1366,7 @@ def setup_chat_routes(
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
                                     incognito=incognito,
+                                    zero_tool_claim_count=_zero_tool_claim_count,
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'

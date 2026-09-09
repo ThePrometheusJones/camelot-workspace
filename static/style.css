@@ -3447,6 +3447,11 @@ body.bg-pattern-sparkles {
     .msg-action-btn[data-action="shorten"] { position:relative; top:1px; font-size:1.25rem; }
     .msg-delete-btn { position:relative; top:1px; }
     .msg-delete-btn:hover { color:var(--red); }
+    .msg-retract-btn:hover { color:var(--red); }
+    .tool-count-badge { font-size:0.65rem; background:var(--panel,#1e1e1e); border:1px solid var(--border,#333); border-radius:8px; padding:1px 6px; margin-left:6px; opacity:0.7; vertical-align:middle; }
+    .zero-tool-flag { font-size:0.65rem; color:var(--red,#e06c75); margin-left:6px; font-weight:bold; vertical-align:middle; }
+    .msg-retracted { opacity:0.5; border-left:3px solid var(--red, #e06c75); position:relative; }
+    .msg-retracted::after { content:'RETRACTED'; position:absolute; top:4px; right:8px; font-size:0.65rem; color:var(--red, #e06c75); font-weight:bold; letter-spacing:1px; }
     .msg-more-btn {
       font-size:0.7rem; letter-spacing:0.5px;
     }

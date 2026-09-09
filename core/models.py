@@ -115,12 +115,31 @@ class Session:
         ``metadata.source == "slash"``; exclude them here so they never reach
         the model. Display/history-load paths use the raw ``history`` and are
         unaffected.
+
+        Retracted messages (``metadata.retracted == True``) stay in history
+        for display but are replaced in context with a one-line notice so
+        the model cannot reference fabricated content.
         """
-        return [
-            msg.to_dict()
+        out = []
+        for msg in self.history:
+            md = msg.metadata or {}
+            if md.get("source") == "slash":
+                continue
+            if md.get("retracted"):
+                out.append({
+                    "role": msg.role,
+                    "content": "[Assistant message retracted by user as fabricated. Do not reference its contents.]",
+                })
+                continue
+            out.append(msg.to_dict())
+        return out
+
+    def has_retracted_messages(self) -> bool:
+        """Return True if any message in this session is retracted."""
+        return any(
+            (msg.metadata or {}).get("retracted")
             for msg in self.history
-            if (msg.metadata or {}).get("source") != "slash"
-        ]
+        )
 
     def get(self, key: str, default=None):
         """Dict-like access for compatibility."""

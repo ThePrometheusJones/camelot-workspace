@@ -18,6 +18,9 @@ When cherry-picking upstream updates, check these files for conflicts.
 | File | Change |
 |------|--------|
 | `src/agent_loop.py` | Added "guinevere" to `_model_supports_tools` keyword list (line ~1520) |
+| `src/agent_loop.py` | Added `send_all_tools` setting (2026-09-01, commit 89b8411f). When true, bypasses RAG tool selection and ships all tools every turn (~134 tools). **Currently active** in `data/settings.json`. Upstream `tool_index.py` RAG filtering + keyword fallback is intact but not exercised. Note: full tool array adds ~16K tokens to every request. Disable (`"send_all_tools": false`) to restore RAG filtering. |
+| `src/agent_loop.py` | Honesty guardrail (2026-09-01, branch `honesty-fixes`): added rule to `_AGENT_RULES` and `_API_AGENT_RULES` — model must never present inferred/guessed data as tool output |
+| `mcp_servers/email_server.py` | Honesty guardrail (2026-09-01, branch `honesty-fixes`): image attachment warning — explicitly tells model it cannot see image contents, must not fabricate |
 | `src/tool_parsing.py` | Added Pattern 6: bracket marker `*[Action — query]*` regex + `_BRACKET_ACTION_MAP` + `_parse_bracket_markers()` |
 
 ### Memory
@@ -52,7 +55,7 @@ When cherry-picking upstream updates, check these files for conflicts.
 | File | Notes |
 |------|-------|
 | `.env` | Camelot-specific: SearXNG on :8889, ChromaDB on :8100, LOCALHOST_BYPASS=false |
-| `data/settings.json` | tts_provider=fish_speech, voice=gwen_ref |
+| `data/settings.json` | tts_provider=fish_speech, voice=gwen_ref, **send_all_tools=true** (bypasses tool_index RAG selection — all ~134 tools shipped every turn) |
 | `data/presets.json` | Generated at runtime with "guinevere" preset |
 
 ## DB Records

@@ -67,7 +67,6 @@ Hermes Agent (by Nous Research) is **not running**. It's dormant infrastructure.
 | SOUL-GWEN.md | `~/.hermes/SOUL-GWEN.md` | Loaded by `preset_manager.py` as Guinevere's system prompt |
 | vault_recall.db | `~/.hermes/vault_recall.db` | Read-only by `vault_recall_provider.py` as Tier 2 memory |
 | Obsidian vault indexing | `~/obsidian-vault/Camelot V3/` | Hermes plugin indexed it into vault_recall.db |
-| Meditation extracts | `~/meditation/` | External process promotes session insights to vault |
 
 **Bottom line:** Hermes is a parts car. The Bailey took the engine (identity + memory) and built its own chassis (web UI + agent loop + tool system). Hermes's TUI, Telegram gateway, and plugin system are unused.
 
@@ -169,7 +168,6 @@ Two-tier system that makes Guinevere remember across sessions:
 - Long-term knowledge from the Obsidian vault
 - Populated by Hermes vault indexing plugin
 - Read-only from The Bailey's perspective
-- Promotion path: meditation cron consolidates Tier 1 → Tier 2
 
 ### Skills
 
@@ -279,8 +277,6 @@ git merge upstream/main
 ~/obsidian-vault/Camelot V3/         # Guinevere's knowledge vault
   └── memory/                        # Indexed into vault_recall.db
 
-~/meditation/                        # Session insight consolidation
-  └── *.md                           # Promoted to vault via meditation cycle
 ```
 
 ---

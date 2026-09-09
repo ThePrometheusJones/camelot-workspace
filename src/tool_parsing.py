@@ -747,6 +747,15 @@ def _iter_xml_direct(text):
     _iter_backref_blocks)."""
     return _iter_backref_blocks(text, _XML_DIRECT_OPEN_RE, _XML_DIRECT_CLOSE_ANY_RE, ci=True)
 
+# Per-call pattern name set by parse_tool_blocks; read by agent_loop for
+# DEBUG logging and tool_events metadata.  This is a diagnostic aid, NOT
+# safe to rely on across requests — concurrent async generators interleave
+# and can overwrite it.  The agent loop reads it synchronously right after
+# parse_tool_blocks returns within the same generator frame, which is safe.
+# Do not use this value in any branching logic or security decision.
+last_matched_pattern: Optional[str] = None
+
+
 def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
@@ -770,7 +779,9 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     silently lose real calls (e.g. DeepSeek-V falling back to DSML when it
     can't emit structured tool_calls).
     """
+    global last_matched_pattern
     blocks = []
+    pattern = None
 
     # Normalize DeepSeek DSML markup into standard <invoke> form so the
     # XML patterns below catch it.
@@ -783,24 +794,21 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             content = m.group(2).strip()
             if not content:
                 continue
-            # If a code block's content is an <invoke> XML call (some models wrap
-            # tool calls in ```python or ```xml fences), parse the invoke instead.
             if '<invoke' in content:
                 for inv in _XML_INVOKE_RE.finditer(content):
                     block = _parse_xml_invoke(inv)
                     if block:
                         blocks.append(block)
-                # This fenced block is <invoke> markup, not literal code. Whether or
-                # not any call converted, never fall through to append the raw XML as
-                # a python/bash block — e.g. a hyphenated/namespaced tool name that
-                # _XML_INVOKE_RE's \w+ can't match would otherwise be executed as code.
+                        pattern = "fenced_xml_invoke"
                 continue
             if tag in ("python", "bash"):
                 block = _parse_misfenced_web_lookup(content)
                 if block:
                     blocks.append(block)
+                    pattern = "misfenced_web"
                     continue
             blocks.append(ToolBlock(tag, content))
+            pattern = "fenced"
 
     # Pattern 2: [TOOL_CALL] blocks (only if no fenced blocks found)
     if not blocks:
@@ -808,21 +816,22 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             block = _parse_tool_call_block(m.group(1))
             if block:
                 blocks.append(block)
+                pattern = "tool_call_block"
 
     # Pattern 3: XML-style <tool_call>/<invoke> blocks
     if not blocks:
-        # Try wrapped: <tool_call><invoke ...>...</invoke></tool_call>
         for m in _XML_TOOL_CALL_RE.finditer(text):
             for inv in _XML_INVOKE_RE.finditer(m.group(1)):
                 block = _parse_xml_invoke(inv)
                 if block:
                     blocks.append(block)
-        # Try bare <invoke> without wrapper
+                    pattern = "xml_invoke"
         if not blocks:
             for inv in _XML_INVOKE_RE.finditer(text):
                 block = _parse_xml_invoke(inv)
                 if block:
                     blocks.append(block)
+                    pattern = "xml_invoke_bare"
 
     # Pattern 4: <tool_code> blocks (MiniMax-M2.5 style)
     if not blocks:
@@ -830,6 +839,7 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             block = _parse_tool_code_block(m.group(1))
             if block:
                 blocks.append(block)
+                pattern = "tool_code"
 
     # Pattern 4c: <function_model> wrapper from local MLX/Exo models.
     if not blocks:
@@ -839,16 +849,25 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             block = _parse_function_model_call(text[inner_start:inner_end])
             if block:
                 blocks.append(block)
+                pattern = "function_model"
 
     # Pattern 6: local text-model web_search call leaked as prose + bare JSON.
     if not blocks and not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(text)
         if raw_web_json:
             blocks.append(raw_web_json[0])
+            pattern = "raw_web_json"
 
     # Pattern 7: Guinevere bracket markers *[Action — query]* (last resort)
     if not blocks:
         blocks = _parse_bracket_markers(text)
+        if blocks:
+            pattern = "bracket_marker"
+
+    last_matched_pattern = pattern
+    if blocks:
+        logger.debug("parse_tool_blocks: pattern=%s blocks=%d tools=%s",
+                      pattern, len(blocks), [b.tool_type for b in blocks])
 
     return blocks
 

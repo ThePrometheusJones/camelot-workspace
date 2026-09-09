@@ -873,11 +873,12 @@ class TaskScheduler:
                 )
 
             # Log result to the assistant chat so all task activity is visible.
-            # Skip skipped/error rows — user shouldn't see "skipped: …" noise
-            # for cron tasks that no-op'd, or duplicate error spam for tasks
-            # that already fired an error notification above.
+            # Skip skipped rows (no-op cron noise), but DO log errors so
+            # tool failures surface in the conversation instead of vanishing.
             if run.status == "success":
                 self._log_to_assistant(db, task, run.result or "[success]")
+            elif run.status == "error":
+                self._log_to_assistant(db, task, f"⚠️ Task failed: {run.error or 'unknown error'}")
 
             # Task chaining — trigger the next task on success
             if run.status == "success" and task.then_task_id:
