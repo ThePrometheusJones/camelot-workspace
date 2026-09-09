@@ -57,6 +57,57 @@ class TestRetraction:
         sess = _make_session(msgs)
         assert sess.has_retracted_messages() is False
 
+    def test_retraction_orm_column(self):
+        """Verify retracted flag round-trips through the real DB column
+        (meta_data, not the ORM .metadata attribute)."""
+        from core.database import SessionLocal, ChatMessage as DbChatMessage
+        from core.database import Session as DbSession
+        import uuid
+        from datetime import datetime, timezone
+
+        db = SessionLocal()
+        sess_id = f"__test_retract_{uuid.uuid4().hex[:8]}__"
+        msg_id = str(uuid.uuid4())
+        try:
+            # Create a parent session (FK constraint)
+            now = datetime.now(timezone.utc)
+            db_sess = DbSession(
+                id=sess_id, name="test", endpoint_url="", model="test",
+                created_at=now, updated_at=now,
+            )
+            db.add(db_sess)
+            db.flush()
+
+            # Write a message with retracted=True in metadata
+            db_msg = DbChatMessage(
+                id=msg_id,
+                session_id=sess_id,
+                role="assistant",
+                content="I checked your email and found 3 new messages.",
+                meta_data=json.dumps({"retracted": True, "_test": True}),
+            )
+            db.add(db_msg)
+            db.commit()
+
+            # Re-read and verify the flag survives
+            reloaded = db.query(DbChatMessage).filter(DbChatMessage.id == msg_id).first()
+            assert reloaded is not None
+            meta = json.loads(reloaded.meta_data or "{}")
+            assert meta["retracted"] is True
+
+            # Toggle off
+            meta["retracted"] = False
+            reloaded.meta_data = json.dumps(meta)
+            db.commit()
+            reloaded2 = db.query(DbChatMessage).filter(DbChatMessage.id == msg_id).first()
+            meta2 = json.loads(reloaded2.meta_data or "{}")
+            assert meta2["retracted"] is False
+        finally:
+            # Clean up (cascade deletes messages)
+            db.query(DbSession).filter(DbSession.id == sess_id).delete()
+            db.commit()
+            db.close()
+
     def test_slash_messages_still_excluded(self):
         msgs = [
             _make_msg("user", "/setup test", source="slash"),

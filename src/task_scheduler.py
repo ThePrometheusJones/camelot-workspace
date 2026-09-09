@@ -871,14 +871,13 @@ class TaskScheduler:
                     owner=task.owner,
                     body=run.result if output == "notification" else None,
                 )
-
-            # Log result to the assistant chat so all task activity is visible.
-            # Skip skipped rows (no-op cron noise), but DO log errors so
-            # tool failures surface in the conversation instead of vanishing.
-            if run.status == "success":
-                self._log_to_assistant(db, task, run.result or "[success]")
-            elif run.status == "error":
-                self._log_to_assistant(db, task, f"⚠️ Task failed: {run.error or 'unknown error'}")
+            # Errors always get a notification regardless of task type or
+            # notification preference — a silent failure is worse than noise.
+            if run.status == "error" and not should_notify:
+                self.add_notification(
+                    task.name, "error", task_id, owner=task.owner,
+                    body=f"⚠️ {run.error or 'unknown error'}",
+                )
 
             # Task chaining — trigger the next task on success
             if run.status == "success" and task.then_task_id:
@@ -1031,13 +1030,14 @@ class TaskScheduler:
         finally:
             db.close()
 
-    def _log_to_assistant(self, db, task, result_text: str):
+    def _log_to_assistant(self, db, task, result_text: str, *, force: bool = False):
         """Log a task result to the assistant's chat session."""
         # Don't double-log check-ins (they already save directly)
-        if "check-in" in (task.name or "").lower():
+        if not force and "check-in" in (task.name or "").lower():
             return
-        # Built-in housekeeping noise stays out of the chat.
-        if (getattr(task, "action", "") or "") in self._SILENT_ACTIONS:
+        # Built-in housekeeping noise stays out of the chat — unless forced
+        # (errors must always surface, even for silent housekeeping actions).
+        if not force and (getattr(task, "action", "") or "") in self._SILENT_ACTIONS:
             return
         from src.assistant_log import log_to_assistant
         log_to_assistant(
