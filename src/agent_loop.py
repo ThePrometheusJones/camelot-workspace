@@ -2673,6 +2673,8 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    _first_round_tools_sent = []  # actual tool names shipped on round 1 (after disabled filter)
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -2746,6 +2748,8 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
+        if round_num == 1:
+            _first_round_tools_sent = list(_tool_names_sent)
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
@@ -3639,8 +3643,10 @@ async def stream_agent_loop(
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
-    if _relevant_tools:
-        metrics["shipped_tools"] = sorted(_relevant_tools)
+    # _first_round_tools_sent is set on round 1 below; captures the actual
+    # schema names after disabled filtering (not just the RAG selection).
+    if _first_round_tools_sent:
+        metrics["shipped_tools"] = sorted(_first_round_tools_sent)
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

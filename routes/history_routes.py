@@ -241,9 +241,9 @@ def setup_history_routes(session_manager) -> APIRouter:
                     raise HTTPException(404, "Assistant message not found")
 
                 import json as _json
-                meta = _json.loads(db_msg.metadata or "{}")
+                meta = _json.loads(db_msg.meta_data or "{}")
                 meta["retracted"] = bool(retract)
-                db_msg.metadata = _json.dumps(meta)
+                db_msg.meta_data = _json.dumps(meta)
                 db.commit()
 
                 # Update in-memory history too

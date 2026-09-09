@@ -865,10 +865,13 @@ def setup_chat_routes(
         # been retracted (flagged as fabricated), strip tools that can send
         # outbound messages or mutate persistent memory. Read-only until the
         # user clears the retraction from the UI.
-        if sess.has_retracted_messages():
+        _has_retractions = sess.has_retracted_messages()
+        logger.info("[retraction-lockdown] Session %s: has_retracted=%s, history_len=%d", session, _has_retractions, len(sess.history))
+        if _has_retractions:
+            logger.info("[retraction-lockdown] STRIPPING outbound tools for session %s", session)
             disabled_tools.update({
                 "send_email", "reply_to_email",
-                "manage_memory",  # ponytail: blocks add/edit/delete; search/list still work via the action param check in the handler
+                "manage_memory",
             })
 
         # Plan mode: investigate read-only, propose a plan, don't mutate. Block
