@@ -2240,14 +2240,18 @@ async def stream_agent_loop(
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
     # ponytail: send_all_tools bypasses RAG filtering — all tools always available
     _send_all = bool(get_setting("send_all_tools", False))
-    _relevant_tools = set() if guide_only else relevant_tools
+    # None from caller = "no pre-computed set" → start empty so RAG runs.
+    # Only the send_all sentinel below sets _relevant_tools = None.
+    _relevant_tools = set() if (guide_only or not relevant_tools) else set(relevant_tools)
     _t1 = time.time()
     if _send_all and not guide_only and not relevant_tools:
-        _relevant_tools = None
+        _relevant_tools = None  # sentinel: ship full FUNCTION_TOOL_SCHEMAS
         logger.info("[tool-rag] send_all_tools=true, skipping RAG tool selection")
     elif _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
-    if not guide_only and not _relevant_tools and bool(_intent.get("low_signal")):
+    # Low-signal / RAG fallback: only when _relevant_tools is an empty set,
+    # NOT when it is None (the send_all_tools sentinel meaning "ship everything").
+    if not guide_only and _relevant_tools is not None and not _relevant_tools and bool(_intent.get("low_signal")):
         from src.tool_index import ALWAYS_AVAILABLE
         if workspace:
             # An active workspace IS the file-work signal: a vague "look at the
@@ -2264,7 +2268,7 @@ async def stream_agent_loop(
             # Non-English queries are flagged low_signal by the English-only
             # intent classifier, but fastembed retrieval works across languages.
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
-    if not guide_only and not _relevant_tools:
+    if not guide_only and _relevant_tools is not None and not _relevant_tools:
         try:
             from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
             tool_idx = get_tool_index()
@@ -2305,7 +2309,8 @@ async def stream_agent_loop(
 
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
-    if not guide_only and not _relevant_tools and _retrieval_query:
+    # Skip when _relevant_tools is None (send_all_tools sentinel).
+    if not guide_only and _relevant_tools is not None and not _relevant_tools and _retrieval_query:
         from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
         _relevant_tools = set(ALWAYS_AVAILABLE)
         ql = _retrieval_query.lower()

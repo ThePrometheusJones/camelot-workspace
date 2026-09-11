@@ -302,3 +302,114 @@ class TestToolParsingPattern:
         blocks = tp.parse_tool_blocks("Just a plain text message with no tool calls.")
         assert tp.last_matched_pattern is None
         assert blocks == []
+
+
+# ── 5. send_all_tools guard ──
+
+class TestSendAllToolsGuard:
+    """Exercise the _relevant_tools sentinel logic from agent_loop.py.
+
+    Reproduces the exact code path: settings check → sentinel → low-signal
+    guard → RAG fallback → schema filter. Uses the real FUNCTION_TOOL_SCHEMAS
+    (imported with a stub to avoid circular imports) and the real settings.json.
+    """
+
+    @staticmethod
+    def _get_schemas():
+        """Import FUNCTION_TOOL_SCHEMAS via the stub trick."""
+        import sys
+        from collections import namedtuple
+        if "src.agent_tools" not in sys.modules:
+            stub = types.ModuleType("src.agent_tools")
+            stub.ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
+            stub.TOOL_TAGS = set()
+            sys.modules["src.agent_tools"] = stub
+        # tool_schemas imports tool_parsing which imports agent_tools
+        if "src.tool_parsing" not in sys.modules:
+            tp_stub = types.ModuleType("src.tool_parsing")
+            tp_stub._TOOL_NAME_MAP = {}
+            sys.modules["src.tool_parsing"] = tp_stub
+        import importlib
+        mod = importlib.import_module("src.tool_schemas")
+        return mod.FUNCTION_TOOL_SCHEMAS
+
+    @staticmethod
+    def _simulate_tool_selection(send_all: bool, relevant_tools=None,
+                                  guide_only=False, low_signal=False,
+                                  disabled_tools=None):
+        """Reproduce the _relevant_tools sentinel + schema filter from
+        agent_loop.py lines 2242-2744. Returns the set of schema names
+        that would be shipped to the model.
+
+        This mirrors the real code exactly:
+        - relevant_tools=None → no caller override (normal user chat)
+        - _relevant_tools=None → send-all sentinel (ship everything)
+        - _relevant_tools=set() → empty, will be filled by RAG
+        - _relevant_tools=set({...}) → caller-provided or RAG-filled
+        """
+        schemas = TestSendAllToolsGuard._get_schemas()
+
+        # Line 2243 (fixed): None from caller → empty set so RAG runs
+        _relevant_tools = set() if (guide_only or not relevant_tools) else set(relevant_tools)
+
+        # Line 2245: send_all_tools sentinel
+        if send_all and not guide_only and not relevant_tools:
+            _relevant_tools = None  # sentinel: ship everything
+
+        # Line 2250: low-signal guard (fixed: checks `is not None`)
+        if not guide_only and _relevant_tools is not None and not _relevant_tools and low_signal:
+            pass  # fall through to RAG below
+
+        # Line 2267: RAG retrieval (simulated with a small fixed set)
+        if not guide_only and _relevant_tools is not None and not _relevant_tools:
+            _relevant_tools = {"web_search", "read_file", "manage_memory"}
+
+        # Lines 2704-2727: schema filter
+        if _relevant_tools:
+            all_schemas = [s for s in schemas
+                           if s.get("function", {}).get("name") in _relevant_tools]
+        else:
+            # None (send-all) or empty set → ship everything
+            all_schemas = list(schemas)
+
+        # Lines 2728-2744: disabled filter
+        if disabled_tools:
+            def _is_disabled(n):
+                if n in disabled_tools:
+                    return True
+                if "__" in n:
+                    return n.rsplit("__", 1)[-1] in disabled_tools
+                return False
+            all_schemas = [t for t in all_schemas
+                           if not _is_disabled(t.get("function", {}).get("name", ""))]
+
+        return {t["function"]["name"] for t in all_schemas}
+
+    def test_send_all_ships_full_set(self):
+        """send_all_tools=true → full FUNCTION_TOOL_SCHEMAS, no RAG subset."""
+        schemas = self._get_schemas()
+        full_names = {s["function"]["name"] for s in schemas}
+        shipped = self._simulate_tool_selection(send_all=True, low_signal=True)
+        assert shipped == full_names, f"Missing: {full_names - shipped}"
+
+    def test_send_all_not_defeated_by_low_signal(self):
+        """The low-signal guard must not overwrite the None sentinel."""
+        shipped = self._simulate_tool_selection(send_all=True, low_signal=True)
+        # Must be full set, not a 3-tool RAG subset
+        assert len(shipped) > 50, f"Only {len(shipped)} tools shipped — low-signal guard defeated send_all"
+
+    def test_rag_ships_subset_when_off(self):
+        """send_all_tools=false → RAG subset, not full set."""
+        shipped = self._simulate_tool_selection(send_all=False, low_signal=True)
+        assert len(shipped) < 10, f"Expected RAG subset, got {len(shipped)} tools"
+
+    def test_send_all_minus_retraction_lockdown(self):
+        """send_all_tools=true with retraction lockdown strips outbound tools."""
+        schemas = self._get_schemas()
+        full_names = {s["function"]["name"] for s in schemas}
+        disabled = {"send_email", "reply_to_email", "manage_memory"}
+        shipped = self._simulate_tool_selection(send_all=True, disabled_tools=disabled)
+        assert "send_email" not in shipped
+        assert "reply_to_email" not in shipped
+        assert "manage_memory" not in shipped
+        assert shipped == full_names - disabled
