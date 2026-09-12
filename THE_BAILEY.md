@@ -185,9 +185,9 @@ Reusable agent procedures that Guinevere learns and stores.
 
 ### Voice (TTS + STT)
 
-- **TTS:** Fish Speech (Guinevere's voice via gwen_ref), Kokoro, OpenAI-compatible, browser
+- **TTS:** Fish Speech 1.5 on `:7300` — Guinevere's cloned voice via `gwen_ref`. Runs alongside V6 on the 3090 Ti (2.3 GB VRAM). Enabled on boot via `guinevere-voice.service`.
 - **STT:** Whisper API integration
-- Voice input/output in chat
+- **PWA** voice path (`:7900`) routes through Bailey's `/api/chat_stream` — covered by the identity gate.
 
 ### MCP (Model Context Protocol)
 
@@ -237,11 +237,29 @@ git merge upstream/main
 | Service | Port | What | Managed By |
 |---|---|---|---|
 | The Bailey | 7000 | Web UI + API | systemd (`camelot-workspace.service`) |
-| Guinevere (llama-server) | 8080 | LLM inference | separate service |
-| Fish Speech | 7300 | Voice TTS | separate service |
-| Ollama | 11434 | Embeddings (nomic-embed-text) | separate service |
+| Guinevere (llama-server) | 8080 | LLM inference | `guinevere.service` |
+| Fish Speech | 7300 | Voice TTS | `guinevere-voice.service` (After=guinevere) |
+| Ollama | 11434 | Embeddings (nomic-embed-text) | `ollama.service` |
 | ChromaDB | 8100 | Vector memory | Docker (docker-compose.camelot.yml) |
 | SearXNG | 8889 | Web search | Docker (docker-compose.camelot.yml) |
+
+### GPU & VRAM Budget (RTX 3090 Ti, 24564 MiB)
+
+V6 and Fish Speech coexist on a single 3090 Ti. Config tuned via prefill benchmark (2026-09-11).
+
+| Component | VRAM | Notes |
+|---|---:|---|
+| Guinevere V6 (Q5_K_M, ncmoe 12, 128K, q8_0 KV, MTP) | 20238 MiB | Config in `/etc/camelot/models.yaml` |
+| Fish Speech TTS (gwen_ref) | 2272 MiB | Lazy-loads on first render |
+| Ollama embed (nomic-embed-text) | 384 MiB | |
+| Brave + 1Password (CUDA context, rendering on AMD 890M) | 137 MiB | Irreducible |
+| gnome-shell + Xwayland | ~90 MiB | |
+| **Total idle** | **~23120 MiB** | |
+| **Peak under concurrent prefill + TTS** | **~23990 MiB** | ~570 MiB headroom |
+
+VRAM pressure monitor: scheduler notifies when free < 300 MiB.
+
+**Identity gate:** The `guinevere` preset carries `expected_model: guinevere-v6-q5_k_m.gguf`. Before any agent turn or scheduled task, Bailey checks `/v1/models`. Mismatch → chat refuses, tasks defer 30 min.
 
 ---
 

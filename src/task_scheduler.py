@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -602,6 +604,34 @@ class TaskScheduler:
         finally:
             db.close()
 
+    # VRAM pressure threshold — notify once per breach, reset when pressure lifts.
+    _VRAM_FREE_THRESHOLD_MIB = 300
+    _vram_alert_active = False
+
+    def _check_vram_pressure(self):
+        """Notify when free VRAM drops below threshold."""
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=memory.free,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                text=True, timeout=5,
+            ).strip()
+            free, used, total = [int(x.strip()) for x in out.split(",")]
+        except Exception:
+            return
+        if free < self._VRAM_FREE_THRESHOLD_MIB:
+            if not self._vram_alert_active:
+                self._vram_alert_active = True
+                msg = f"VRAM pressure: {free} MiB free ({used}/{total} used)"
+                logger.warning(msg)
+                self.add_notification(
+                    "VRAM Monitor", "warning", body=msg,
+                )
+        else:
+            if self._vram_alert_active:
+                self._vram_alert_active = False
+                logger.info("VRAM pressure cleared: %d MiB free", free)
+
     async def _loop(self):
         await asyncio.sleep(10)
         while self._running:
@@ -609,6 +639,7 @@ class TaskScheduler:
                 await self._check_due_tasks()
             except Exception:
                 logger.exception("Error in task scheduler loop")
+            self._check_vram_pressure()
             # Sleep until the next scheduled run, capped at 60s. A `* * * * *`
             # cron task previously fired up to ~60s late because we always
             # slept the full minute; now the loop wakes near the boundary.
