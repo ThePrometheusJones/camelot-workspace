@@ -1339,6 +1339,27 @@ class TaskScheduler:
             endpoint_url, model = self._resolve_defaults(db, task.owner)
         if not endpoint_url or not model:
             raise RuntimeError("No model/endpoint configured")
+
+        # Identity gate: defer if the wrong model is loaded.
+        # Reads expected_model from the guinevere preset. Scheduled tasks
+        # defer and retry after the swap window instead of running against
+        # the wrong model.
+        try:
+            from src.model_identity import check_model_identity
+            import json as _json
+            _presets_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), "data", "presets.json"
+            )
+            with open(_presets_path) as _pf:
+                _em = _json.load(_pf).get("guinevere", {}).get("expected_model", "")
+            if _em:
+                _ok, _actual, _msg = check_model_identity(endpoint_url, _em)
+                if not _ok:
+                    from src.builtin_actions import TaskDeferred
+                    raise TaskDeferred(_msg, delay_seconds=30 * 60)
+        except (ImportError, FileNotFoundError, KeyError):
+            pass
+
         # Record the resolved model so _execute_task_locked can persist it on
         # the run (tasks rarely pin a model, so this is the only record of
         # which model actually produced the output).

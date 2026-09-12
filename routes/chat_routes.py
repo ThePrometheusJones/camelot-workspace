@@ -1281,6 +1281,17 @@ def setup_chat_routes(
                         _restored_tools = _session_tool_cache[session]
                         logger.info("[tool-cache] Restoring %d cached tools for continuation in session %s", len(_restored_tools), session)
 
+                    # Identity gate: refuse if wrong model is loaded
+                    if ctx.preset.expected_model:
+                        from src.model_identity import check_model_identity
+                        _id_ok, _id_actual, _id_msg = check_model_identity(
+                            sess.endpoint_url, ctx.preset.expected_model,
+                        )
+                        if not _id_ok:
+                            yield f'data: {json.dumps({"delta": _id_msg})}\n\n'
+                            yield "data: [DONE]\n\n"
+                            return
+
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,

@@ -27,6 +27,7 @@ class PresetManager:
             "temperature": 0.7,
             "max_tokens": 0,
             "system_prompt": _SOUL_CONTENT,
+            "expected_model": "guinevere-v6-q5_k_m.gguf",
         },
         "code_analyze": {
             "name": "Code Analyze",

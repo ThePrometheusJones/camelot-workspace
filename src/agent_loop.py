@@ -1876,6 +1876,7 @@ def _compute_final_metrics(
         metrics["agent_prep_breakdown"] = {
             key: round(value, 3) for key, value in prep_timings.items()
         }
+    metrics["agent_rounds"] = len(round_texts) or 1
     if tool_events:
         metrics["tool_events"] = tool_events
         metrics["round_texts"] = round_texts

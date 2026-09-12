@@ -32,6 +32,7 @@ class PresetInfo:
     max_tokens: Optional[int]
     system_prompt: Optional[str]
     character_name: Optional[str]
+    expected_model: Optional[str] = None
 
 
 @dataclass
@@ -298,7 +299,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
 
 def extract_preset(chat_handler, preset_id) -> PresetInfo:
     """Extract preset parameters via chat_handler."""
-    temperature, max_tokens, system_prompt, char_name = (
+    temperature, max_tokens, system_prompt, char_name, expected_model = (
         chat_handler.validate_and_extract_preset(preset_id)
     )
     return PresetInfo(
@@ -306,6 +307,7 @@ def extract_preset(chat_handler, preset_id) -> PresetInfo:
         max_tokens=max_tokens,
         system_prompt=system_prompt,
         character_name=char_name,
+        expected_model=expected_model or None,
     )
 
 

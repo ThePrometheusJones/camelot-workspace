@@ -81,8 +81,12 @@ class ChatHandler:
             if "max_tokens" in preset:
                 max_tokens = preset["max_tokens"]
 
+        expected_model = ""
+        if preset_id and preset_id in self.preset_manager.presets:
+            expected_model = self.preset_manager.presets[preset_id].get("expected_model", "")
+
         logger.info(f"Preset {preset_id}: temp={temperature}, max_tokens={max_tokens}")
-        return temperature, max_tokens, preset_system_prompt, character_name
+        return temperature, max_tokens, preset_system_prompt, character_name, expected_model
 
     def enhance_message_if_needed(self, message: str) -> str:
         """CoT enhancement disabled — modern models reason natively."""
